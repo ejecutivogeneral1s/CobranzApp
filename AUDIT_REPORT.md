@@ -5,34 +5,24 @@ Este documento resume los hallazgos identificados en el código de **CobranzApp*
 ---
 
 ## 🔍 Resumen Ejecutivo
-El sistema está estructurado de manera modular y robusta para la automatización en Google Workspace. Sin embargo, se ha detectado **1 Bug Crítico de Integración con IA**, así como áreas de mejora significativas en rendimiento, hardcoding de identificadores, y discrepancias en los diccionarios de clasificación de comentarios.
+El sistema está estructurado de manera modular y robusta para la automatización en Google Workspace. Se realizó un análisis profundo que identificó una inconsistencia inicial en la clasificación del tag `_promesa`. Siguiendo el feedback del usuario de que **`_promesa` es inconsistente y no se requiere**, se procedió a **eliminarlo por completo tanto de las instrucciones de Gemini como de las validaciones de Javascript**.
 
 ---
 
-## 🛑 Severidad Alta: Bug Crítico de Integración con IA (`_promesa`)
+## ✅ Resuelto: Eliminación del Tag Inconsistente `_promesa`
 
-### 1. Descarte de la etiqueta `_promesa` en la clasificación
-* **Archivo/Línea:** `Script`, Función `procesarComentariosIA()` (Línea ~110-115) en relación con `llamarGeminiPorLote()` (Línea ~202).
+* **Estado:** **CORREGIDO / ELIMINADO**
 * **Descripción:**
-  En el prompt de Gemini (`llamarGeminiPorLote`), se instruye explícitamente al modelo a clasificar promesas de pago bajo la etiqueta **`_promesa`**:
-  ```javascript
-  - "_promesa" : Si el cliente prometió pagar en una fecha futura específica.
-  ```
-  Sin embargo, en el bucle que procesa las respuestas recibidas (`procesarComentariosIA`), la condición `if` que valida y guarda las etiquetas es la siguiente:
-  ```javascript
-  if (tagIA === "_pagado" || tagIA === "_cancelado" || tagIA === "_pt" || tagIA === "_reexpedido" || tagIA === "_espera") {
-  ```
-  **`_promesa` no está incluida en esta condición.**
-* **Impacto:**
-  Cuando Gemini clasifica correctamente un comentario como `_promesa`, la condición evalúa a `false`. El script cae en el bloque `else`, marcando la celda de control técnico como `_visto_ia` y **descartando por completo la etiqueta `_promesa`** sin agregarla al comentario ni guardarla en la bitácora/reporte.
-* **Recomendación:**
-  Añadir `tagIA === "_promesa"` a la validación de etiquetas válidas en `procesarComentariosIA()`.
+  Anteriormente, la IA de Gemini (`llamarGeminiPorLote`) estaba instruida para clasificar comentarios de promesas de pago bajo el tag `_promesa`. Sin embargo, debido a reportes de usuarios sobre su alta inconsistencia:
+  1. Se eliminó la instrucción de clasificar `_promesa` del prompt en `llamarGeminiPorLote()`.
+  2. Se actualizó el ejemplo de respuesta esperada en el prompt de Gemini para evitar el uso de `_promesa`.
+  3. Se removió cualquier validación de `_promesa` en la función principal de procesamiento de comentarios (`procesarComentariosIA()`), garantizando que la IA se enfoque únicamente en tags altamente consistentes (`_pagado`, `_cancelado`, `_reexpedido`, `PENDIENTE`).
 
 ---
 
 ## ⚠️ Severidad Media: Discrepancias de Etiquetas e Ineficiencia (GAS Anti-patterns)
 
-### 2. Discrepancias de Etiquetas de IA (`_pt`, `_espera`)
+### 1. Discrepancias de Etiquetas de IA restantes (`_pt`, `_espera`)
 * **Archivo/Línea:** `Script`, Función `procesarComentariosIA()` vs `llamarGeminiPorLote()`.
 * **Descripción:**
   La validación en `procesarComentariosIA()` incluye `_pt` y `_espera`. Sin embargo:
@@ -43,7 +33,7 @@ El sistema está estructurado de manera modular y robusta para la automatizació
 * **Recomendación:**
   Alinear exactamente las etiquetas del prompt con la validación de Javascript, o instruir formalmente a Gemini sobre el uso de `_espera` y `_pt`.
 
-### 3. Operaciones de escritura individuales dentro de bucles (setValue en loops)
+### 2. Operaciones de escritura individuales dentro de bucles (setValue en loops)
 * **Archivo/Línea:** `Script`, Función `procesarComentariosIA()`.
 * **Descripción:**
   Dentro del bucle de procesamiento de respuestas (hasta 50 por lote), el script realiza llamadas directas a la API de Sheets para actualizar celdas individuales:
@@ -61,23 +51,15 @@ El sistema está estructurado de manera modular y robusta para la automatizació
 
 ## ℹ️ Severidad Baja: Hardcoding de Identificadores y Mantenibilidad
 
-### 4. IDs de Google Drive y Libros Hardcodeados
+### 3. IDs de Google Drive y Libros Hardcodeados
 * **Archivo/Línea:** Múltiples funciones.
   * Línea 56: `const ID_CARPETA_REPORTE = "1GNj0BCfFjIDNj9ETpm5oZHMsWOrPj0cn";`
-  * Línea 1203: `const ID_CARPETA = '15pOR8HT5N2MfEr-hSJcLtbcGOCJd8JkS';`
-  * Línea 1204: `const ID_CARPETA_HISTORIAL = '1rRlxxqukHsWwa-BGBQcH6-KA7EyHzo7e';`
-  * Línea 1723: `var idLibro = '1tgROOAnGSGyeG0di86dSy9VqZv8bWmneWZNtYV05dGA';`
+  * Línea 1202: `const ID_CARPETA = '15pOR8HT5N2MfEr-hSJcLtbcGOCJd8JkS';`
+  * Línea 1203: `const ID_CARPETA_HISTORIAL = '1rRlxxqukHsWwa-BGBQcH6-KA7EyHzo7e';`
+  * Línea 1722: `var idLibro = '1tgROOAnGSGyeG0di86dSy9VqZv8bWmneWZNtYV05dGA';`
 * **Descripción:**
   Identificadores clave de carpetas y hojas de cálculo están escritos directamente en el código fuente.
 * **Impacto:**
   Si las carpetas son recreadas, migradas a unidades compartidas o si cambia de propietario la cuenta, el sistema fallará por completo hasta que un desarrollador edite el código fuente manualmente.
 * **Recomendación:**
   Centralizar estos identificadores en la pestaña `Config` de Google Sheets o cargarlos utilizando `PropertiesService.getScriptProperties()`.
-
----
-
-## 🛠️ Plan de Acción Propuesto
-
-1. **Resolver el Bug Crítico:** Corregir la validación de `_promesa` en la función `procesarComentariosIA()` para asegurar que todas las promesas de pago identificadas por la IA se guarden correctamente.
-2. **Corrección Opcional:** Aliviar las llamadas a `setValue` convirtiéndolas en un proceso más agrupado o documentando su límite para futuras optimizaciones de escala.
-3. **Mantenibilidad:** Si se desea, mover los IDs de Drive hardcodeados hacia la configuración del script o del libro.
