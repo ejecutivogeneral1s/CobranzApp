@@ -112,7 +112,7 @@ function procesarComentariosIA() {
             let tagIA = String(respuestasGemini[j]).trim().toLowerCase();
 
             // ✨ AHORA VERIFICAMOS MÚLTIPLES ETIQUETAS (Puedes agregar más si lo necesitas)
-            if (tagIA === "_pagado" || tagIA === "_cancelado" || tagIA === "_pt" || tagIA === "_reexpedido" || tagIA === "_espera") {
+            if (tagIA === "_pagado" || tagIA === "_cancelado" || tagIA === "_reexpedido") {
               
               // ✨ Concatenamos la etiqueta al final del comentario original y la guardamos en la columna Comentario
               let nuevoComentario = item.comentario + " " + tagIA;
@@ -208,14 +208,13 @@ function llamarGeminiPorLote(lote, key) {
   Tu tarea es leer una lista de comentarios extraídos de un CRM (Quattro) y clasificar cada uno asignándole UNA de las siguientes etiquetas exactas:
 
   - "_pagado" : Si indica que se liquidó la totalidad del recibo o se aplicó el cobro.
-  - "_promesa" : Si el cliente prometió pagar en una fecha futura específica.
   - "_cancelado" : Si la póliza o el recibo fue anulado o declinado definitivamente. incluye perdidas totales (PT)
   - "_reexpedido" : Si el recibo o poliza ya no es valido por reexpedición.
-  - "PENDIENTE" : Si el texto está vacío o no da indicios claros de ninguna de las anteriores.
+  - "" (cadena vacía) : Si el texto está vacío o no da indicios claros de ninguna de las anteriores.
 
   REGLA ESTRICTA Y CRÍTICA: Devuelve ÚNICAMENTE un arreglo JSON válido. Sin formato markdown, sin tildes, sin explicaciones.
   ⚠️ IMPORTANTE: Recibirás exactamente ${lote.length} comentarios. Tu arreglo de respuesta DEBE contener EXACTAMENTE ${lote.length} elementos, manteniendo el mismo orden. NO OMITAS NINGUNO.
-  Ejemplo de salida esperada: ["_pagado", "PENDIENTE", "_promesa"]
+  Ejemplo de salida esperada: ["_pagado", "", "_cancelado"]
 
   Comentarios a analizar:\n`;
 
