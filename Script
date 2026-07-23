@@ -1,0 +1,2090 @@
+/**
+ * Crea un menú personalizado en Google Sheets al abrir el documento.
+ */
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  
+  ui.createMenu('🤖 CobranzApp')
+    .addItem('🧠 Identificar bitacoras sin etiquetar (IA)', 'procesarComentariosIA')
+    .addSeparator() // Una rayita divisora para que se vea elegante
+    .addItem('🚀 Generar y enviar: Reportes Promotoria', 'hazmeReportesPromoExpress')
+    .addSeparator() // Una rayita divisora para que se vea elegante
+    .addItem('💼 Generar y enviar: Reportes JMV', 'generarReportesJMV')
+    .addToUi();
+}
+
+function hazmeReportesPromoExpress() {
+  console.log("🚀 Iniciando proceso maestro: AzmeReportesPromoExpress...");
+
+  try {
+    // PASO 1
+    console.log("⏳ [Paso 1/3] Ejecutando procesarReportesQuattroXLSX...");
+    let resultadoQuattro = procesarReportesQuattroXLSX();
+    
+    // Validamos si la función nos devolvió un aviso de detención
+    if (resultadoQuattro === "DETENER") {
+      throw new Error("procesarReportesQuattroXLSX detectó un problema (Seguro de fecha o Vendedores sin grupo).");
+    }
+    console.log("✅ Paso 1 completado con éxito.");
+
+    // PASO 2
+    console.log("⏳ [Paso 2/3] Ejecutando generarReporteGlobalPromotoria...");
+    generarReporteGlobalPromotoria();
+    console.log("✅ Paso 2 completado con éxito.");
+
+    // PASO 3
+    console.log("⏳ [Paso 3/3] Ejecutando generarReportesIndividualesPromotoria...");
+    generarReportesIndividualesPromotoria();
+    console.log("✅ Paso 3 completado con éxito.");
+
+    console.log("🎉 PROCESO EXPRESS FINALIZADO AL 100%.");
+
+  } catch (error) {
+    // Si cualquier paso lanza un error, el código brinca directo aquí y NO ejecuta lo demás
+    console.error(`🛑 EJECUCIÓN MAESTRA ABORTADA: ${error.message}`);
+  }
+}
+
+/** MOTOR DE IA: ANALIZA COMENTARIOS Y DETECTA ETIQUETAS MÚLTIPLES
+ * Procesa en lotes de 50, usa columna técnica de control y genera reporte con Ramo. */
+function procesarComentariosIA() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const hojaMaestra = ss.getSheetByName('BD_Cobranza');
+  
+  // 1. CONFIGURACIÓN E ÍNDICES
+  const API_KEY = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  const ID_CARPETA_REPORTE = "1GNj0BCfFjIDNj9ETpm5oZHMsWOrPj0cn"; 
+  
+  if (!API_KEY) return SpreadsheetApp.getUi().alert("❌ ERROR: Falta la API Key en Propiedades del Script.");
+  if (!hojaMaestra) return SpreadsheetApp.getUi().alert("No se encontró la hoja BD_Cobranza");
+
+  const datos = hojaMaestra.getDataRange().getValues();
+  const cabeceras = datos[0];
+  
+  // Mapeo dinámico de columnas
+  const idxCliente = cabeceras.indexOf('Cliente');
+  const idxPoliza = cabeceras.indexOf('Póliza');
+  const idxRecibo = cabeceras.indexOf('Serie recibo');
+  const idxConcepto = cabeceras.indexOf('Concepto');
+  const idxComentario = cabeceras.indexOf('Comentario');
+  const idxNotas = cabeceras.indexOf('Notas_Asistente');
+  const idxStatusIA = cabeceras.indexOf('status_cobranzapp');
+  const idxRamo = cabeceras.indexOf('Ramo');
+
+  // =========================================================================
+  // 2. RECOLECTAR SOLO LOS QUE NECESITAN ANÁLISIS Y PROCESAR POR LOTES
+  // =========================================================================
+  let lote = [];
+  let cambiosParaReporte = [];
+  let contadorModificados = 0;
+
+  for (let i = 1; i < datos.length; i++) {
+    let comentario = String(datos[i][idxComentario]).trim();
+    if (comentario === "") continue;
+
+    let notaAsistente = String(datos[i][idxNotas] || "").toLowerCase();
+      let statusIA = (idxStatusIA !== -1) ? String(datos[i][idxStatusIA]).toLowerCase() : "";
+
+      // ✨ Ahora también verificamos si el comentario original ya tiene una etiqueta para no procesarlo doble
+      if (comentario.includes('_') || notaAsistente.includes('_') || statusIA === '_visto_ia') {
+        continue;
+      }
+
+    lote.push({
+      fila: i + 1,
+      cliente: datos[i][idxCliente],
+      poliza: datos[i][idxPoliza],
+      ramo: datos[i][idxRamo],
+      datosRecibo: datos[i][idxRecibo],
+      datosConcepto: datos[i][idxConcepto],
+      comentario: comentario
+    });
+
+    if (lote.length === 50 || i === datos.length - 1) {
+      if (lote.length > 0) {
+        console.log(`Procesando ${lote.length} comentarios (Extraídos entre la fila ${lote[0].fila} y la fila ${lote[lote.length-1].fila})...`);
+        
+        let respuestasGemini = llamarGeminiPorLote(lote, API_KEY);
+        
+        if (respuestasGemini && respuestasGemini.length === lote.length) {
+          for (let j = 0; j < lote.length; j++) {
+            let item = lote[j];
+            let tagIA = String(respuestasGemini[j]).trim().toLowerCase();
+
+            // ✨ AHORA VERIFICAMOS MÚLTIPLES ETIQUETAS (Puedes agregar más si lo necesitas)
+            if (tagIA === "_pagado" || tagIA === "_cancelado" || tagIA === "_pt" || tagIA === "_reexpedido" || tagIA === "_espera") {
+              
+              // ✨ Concatenamos la etiqueta al final del comentario original y la guardamos en la columna Comentario
+              let nuevoComentario = item.comentario + " " + tagIA;
+              hojaMaestra.getRange(item.fila, idxComentario + 1).setValue(nuevoComentario);
+              
+              // Guardamos 7 datos para el reporte
+              cambiosParaReporte.push([
+                item.cliente, 
+                item.poliza, 
+                item.ramo, 
+                item.datosRecibo, 
+                item.datosConcepto, 
+                item.comentario, 
+                tagIA
+              ]);
+              contadorModificados++;
+            } else {
+              if (idxStatusIA !== -1) {
+                hojaMaestra.getRange(item.fila, idxStatusIA + 1).setValue('_visto_ia');
+              }
+            }
+          }
+        } else {
+                  // ✨ LOG EXPLÍCITO DE DIAGNÓSTICO
+                  console.error("🛑 ERROR EN LOTE: La respuesta de Gemini no coincide con el lote o falló.");
+                  console.error(`👉 Esperábamos ${lote.length} etiquetas de respuesta.`);
+                  
+                  if (respuestasGemini === null) {
+                    console.error("👉 Gemini devolvió: NULL. (Revisa si hay un 'Error de API' en los logs anteriores).");
+                  } else {
+                    console.error(`👉 Gemini devolvió un arreglo con ${respuestasGemini.length} elementos.`);
+                    console.error("👉 Contenido exacto devuelto por Gemini: " + JSON.stringify(respuestasGemini));
+                  }
+                }
+
+                lote = [];
+                Utilities.sleep(5000);
+      }
+    }
+  }
+
+  // =========================================================================
+  // 4. GENERACIÓN DEL REPORTE FINAL EN DRIVE
+  // =========================================================================
+  if (cambiosParaReporte.length > 0) {
+    let fechaActual = Utilities.formatDate(new Date(), "GMT-6", "yyyy-MM-dd HH:mm");
+    let nombreArchivo = "Reporte_Analisis_Pagos_IA_" + fechaActual;
+    
+    let nuevoSS = SpreadsheetApp.create(nombreArchivo);
+    let hojaReporte = nuevoSS.getSheets()[0];
+    
+    // Encabezados (7 columnas)
+    let headersReporte = ["Nombre", "Póliza", "Ramo", "Recibo", "Descripción", "Comentario Original", "Resultado IA"];
+    hojaReporte.getRange(1, 1, 1, 7).setValues([headersReporte]).setFontWeight("bold").setBackground("#d9ead3");
+    
+    // ✨ FIX DEL ERROR: Aseguramos que inyecte 7 columnas
+    hojaReporte.getRange(2, 1, cambiosParaReporte.length, 7).setValues(cambiosParaReporte);
+      hojaReporte.autoResizeColumns(1, 7);
+      
+      let file = DriveApp.getFileById(nuevoSS.getId());
+      let carpetaReportes = DriveApp.getFolderById(ID_CARPETA_REPORTE);
+      file.moveTo(carpetaReportes);
+      
+      console.log("✅ Reporte consolidado de cambios de IA guardado en Drive con éxito.");
+
+      // 📧 ENVIAR ENLACE POR CORREO ELECTRÓNICO AL REMITENTE
+      try {
+        let emailUsuario = Session.getActiveUser().getEmail();
+        let urlReporte = nuevoSS.getUrl();
+        let asuntoEmail = `CobranzApp: Reporte de Análisis de Pagos Disponible`;
+        let cuerpoEmail = `Hola,\n\nEl Motor de Inteligencia Artificial ha terminado de procesar el lote de pólizas.\n\nSe ha generado un nuevo reporte de análisis con las etiquetas detectadas. Puedes consultarlo directamente en el siguiente enlace de Google Sheets:\n${urlReporte}\n\nSaludos,\nSistema CobranzApp.`;
+        
+        if (emailUsuario) {
+          GmailApp.sendEmail(emailUsuario, asuntoEmail, cuerpoEmail);
+          console.log(`📩 Correo con enlace del reporte enviado con éxito a: ${emailUsuario}`);
+        }
+      } catch (errorCorreo) {
+        console.error(`⚠️ No se pudo enviar el correo con el enlace: ${errorCorreo.message}`);
+      }
+
+    } else {
+    console.log("🏁 PROCESO FINALIZADO. No se encontraron nuevos pagos para reportar.");
+  }
+}
+
+/** Función auxiliar que pide a Gemini analizar en lote y devolver JSON estricto. Entiende el contexto de seguros y usa tus etiquetas reales. */
+function llamarGeminiPorLote(lote, key) {
+  // Cambiamos al modelo estándar que tiene 1,500 peticiones diarias gratis
+  const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + key;
+
+
+  let promptText = `Actúa como un analista de cobranza de una agencia de seguros.
+  Tu tarea es leer una lista de comentarios extraídos de un CRM (Quattro) y clasificar cada uno asignándole UNA de las siguientes etiquetas exactas:
+
+  - "_pagado" : Si indica que se liquidó la totalidad del recibo o se aplicó el cobro.
+  - "_promesa" : Si el cliente prometió pagar en una fecha futura específica.
+  - "_cancelado" : Si la póliza o el recibo fue anulado o declinado definitivamente. incluye perdidas totales (PT)
+  - "_reexpedido" : Si el recibo o poliza ya no es valido por reexpedición.
+  - "PENDIENTE" : Si el texto está vacío o no da indicios claros de ninguna de las anteriores.
+
+  REGLA ESTRICTA Y CRÍTICA: Devuelve ÚNICAMENTE un arreglo JSON válido. Sin formato markdown, sin tildes, sin explicaciones.
+  ⚠️ IMPORTANTE: Recibirás exactamente ${lote.length} comentarios. Tu arreglo de respuesta DEBE contener EXACTAMENTE ${lote.length} elementos, manteniendo el mismo orden. NO OMITAS NINGUNO.
+  Ejemplo de salida esperada: ["_pagado", "PENDIENTE", "_promesa"]
+
+  Comentarios a analizar:\n`;
+
+  lote.forEach((item, index) => {
+    promptText += `[${index}] Texto: "${item.comentario}"\n`;
+  });
+  
+  const payload = { 
+    "contents": [{ "parts": [{ "text": promptText }] }], 
+    "generationConfig": {
+        "temperature": 0.0,
+        "responseMimeType": "application/json" // 🚀 MAGIA DE VIBECODING: Esto obliga a Gemini a responder JSON perfecto
+    } 
+  };
+  
+  const options = { 
+    "method": "post", 
+    "contentType": "application/json", 
+    "payload": JSON.stringify(payload), 
+    "muteHttpExceptions": true 
+  };
+
+  try {
+    const response = UrlFetchApp.fetch(url, options);
+    if (response.getResponseCode() !== 200) {
+      console.error("Error de API: " + response.getContentText());
+      return null;
+    }
+    
+    // Al usar responseMimeType, el parseo es casi 100% seguro
+    const resText = JSON.parse(response.getContentText());
+    let textoCrudo = resText.candidates[0].content.parts[0].text;
+    
+    return JSON.parse(textoCrudo);
+
+  } catch (error) {
+    console.error("Fallo general en la llamada a Gemini: " + error.message);
+    return null;
+  }
+}
+
+
+/** Función huerfana para descubrir los modelos disponibles de Gemini.  */
+function descubrirMisModelos() {
+  // 🔴 PEGA TU LLAVE AQUÍ
+  const API_KEY = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  
+  
+  const url = "https://generativelanguage.googleapis.com/v1beta/models?key=" + API_KEY;
+  const options = { "method": "get", "muteHttpExceptions": true };
+  
+  const response = UrlFetchApp.fetch(url, options);
+  const json = JSON.parse(response.getContentText());
+  
+  if (json.models) {
+    console.log("✅ MODELOS DISPONIBLES PARA GENERAR TEXTO:");
+    json.models.forEach(m => {
+      // Filtramos solo los que sirven para leer y generar texto
+      if (m.supportedGenerationMethods && m.supportedGenerationMethods.includes("generateContent")) {
+        console.log("👉 " + m.name);
+      }
+    });
+  } else {
+    console.log("❌ Error leyendo modelos: " + response.getContentText());
+  }
+}
+
+/** GENERADOR DE REPORTES PARA ASISTENTES (JMV, EMV, AGM, SUBS)
+ * Versión IA Ready: Seguro de Historial, Lectura Unificada, Etiquetas Flexibles y Formato Perfecto.*/
+function generarReportesJMV() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const hojaMaestra = ss.getSheetByName('BD_Cobranza');
+  const hojaConfig = ss.getSheetByName('Config');
+  const hojaAsignacion = ss.getSheetByName('Asignacion_ReportesJMV');
+  const hojaClaves = ss.getSheetByName('Catalogo_ClavesJMV');
+  
+  if (!hojaMaestra || !hojaConfig || !hojaAsignacion || !hojaClaves) {
+    return console.error("Faltan pestañas requeridas para el motor JMV.");
+  }
+
+  // =========================================================================
+  // 1. CONFIGURACIÓN Y CATÁLOGOS
+  // =========================================================================
+  const esActivo = (valor) => {
+    let v = String(valor).trim().toUpperCase();
+    return (v === "TRUE" || v === "VERDADERO" || v === "1");
+  };
+
+  const diasVista = parseInt(hojaConfig.getRange("B2").getValue());
+  const enviarEmails = esActivo(hojaConfig.getRange("B16").getValue()); 
+  const duplicarConciliados = esActivo(hojaConfig.getRange("B17").getValue());
+  const ubicacionBase = String(hojaConfig.getRange("B15").getValue() || "").trim();
+  const ubicacionALT = String(hojaConfig.getRange("B18").getValue() || "").trim();
+  
+  const fPagado = esActivo(hojaConfig.getRange("B7").getValue());
+  const fCancelado = esActivo(hojaConfig.getRange("B8").getValue());
+  const fCat = esActivo(hojaConfig.getRange("B9").getValue());
+  const fIgnorar = esActivo(hojaConfig.getRange("B10").getValue());
+  const fReexpedido = esActivo(hojaConfig.getRange("B11").getValue());
+  
+  // ✨ SEGURO ANTI-DESACTUALIZACIÓN
+  const validarFecha = esActivo(hojaConfig.getRange("B14").getValue());
+
+  if (validarFecha) {
+    const ID_CARPETA_HISTORIAL = '1rRlxxqukHsWwa-BGBQcH6-KA7EyHzo7e';
+    let carpetaHistorial = DriveApp.getFolderById(ID_CARPETA_HISTORIAL);
+    let archivos = carpetaHistorial.getFilesByType(MimeType.MICROSOFT_EXCEL);
+    let masReciente = null;
+    
+    while(archivos.hasNext()) {
+      let f = archivos.next();
+      if (f.getName().toLowerCase().endsWith('.xlsx')) {
+        if (!masReciente || f.getDateCreated() > masReciente.getDateCreated()) masReciente = f;
+      }
+    }
+    
+    if (!masReciente) return console.error("🛑 ERROR CRÍTICO: No hay archivos en el Historial para validar la fecha.");
+    
+    let hoy = new Date();
+    let fCreacion = masReciente.getDateCreated();
+    
+    console.log(`🛡️ Seguro activado: Evaluando archivo "${masReciente.getName()}" del ${fCreacion.toDateString()}`);
+    
+    if (hoy.toDateString() !== fCreacion.toDateString()) {
+      return console.error(`🛑 ERROR: La BD no se actualizó hoy. Último archivo en Historial: ${fCreacion.toLocaleDateString()}. Reportes JMV abortados.`);
+      return "DETENER";
+    }
+    console.log("✅ Validación de fecha exitosa.");
+  }
+
+  // Carga de Claves
+  let clavesData = hojaClaves.getDataRange().getValues();
+  let clavesPermitidas = new Set();
+  for (let i = 0; i < clavesData.length; i++) {
+    let clave = String(clavesData[i][0]).trim();
+    if (clave !== "") clavesPermitidas.add(clave);
+  }
+
+  // Carga de Asignaciones
+ let configReportes = [];
+ let asigData = hojaAsignacion.getDataRange().getValues();
+ for (let i = 1; i < asigData.length; i++) {
+  let nombre = String(asigData[i][0]).trim();
+  if (nombre === "") continue;
+  
+  // ✨ NUEVO FILTRO: Leer el checkbox en la Columna F (Índice 5)
+  let generarReporte = esActivo(asigData[i][5]); 
+  
+  // Si el checkbox NO está marcado, saltamos esta fila y no preparamos el reporte
+  if (!generarReporte) continue;
+
+  let rawRamos = String(asigData[i][1]).replace(/ y /gi, ",");
+  let rawEmail = asigData[i][4];
+  configReportes.push({
+    nombre: nombre,
+    ramos: rawRamos.split(",").map(s => s.trim().toUpperCase()).filter(s => s !== ""),
+    exclusivos: String(asigData[i][2]).toUpperCase().trim(),
+    bloqueados: String(asigData[i][3]).toUpperCase().trim(),
+    emails: rawEmail ? String(rawEmail).trim() : ""
+  });
+ }
+
+  let fechaCorte = new Date();
+  if (!isNaN(diasVista) && diasVista > 0) {
+    fechaCorte.setDate(fechaCorte.getDate() - diasVista);
+    fechaCorte.setHours(0, 0, 0, 0); 
+  }
+
+  // =========================================================================
+  // 2. EXTRACCIÓN Y CLASIFICACIÓN (Con IA y Variaciones)
+  // =========================================================================
+  const datosMaestros = hojaMaestra.getDataRange().getValues();
+  const cabeceras = datosMaestros[0];
+  
+  const idxVigencia = cabeceras.indexOf('Vigencia inicial recibo'); 
+  const idxRamo = cabeceras.indexOf('Ramo');
+  const idxSubramo = cabeceras.indexOf('Subramo');
+  const idxAgente = cabeceras.indexOf('Clave de Agente');
+  const idxVendedor = cabeceras.indexOf('Vendedor');
+  const idxComentario = cabeceras.indexOf('Comentario');
+  const idxNotas = cabeceras.indexOf('Notas_Asistente');
+
+  let diccionarioReportes = {};
+  configReportes.forEach(cfg => {
+    diccionarioReportes[cfg.nombre] = { "JMV": [], "EMV": [], "AGM": [], "SUBS": [], "Conciliar": [], "Conciliar Subs": [] };
+  });
+
+  // ✨ Diccionarios de variaciones
+  const varsPagado = ['_pagado', '_pagada', '_aplicado', '_aplicada'];
+  const varsCancelado = ['_cancelado', '_cancelada', '_pt'];
+  const varsReexpedido = ['_reexpedido', '_reexpedida'];
+  const idxEstado = cabeceras.indexOf("Estado_Cobranza");
+  const idxStatus = cabeceras.indexOf("status_cobranzapp");
+
+  for (let i = 1; i < datosMaestros.length; i++) {
+    let fila = datosMaestros[i];
+    // ✨ ESCUDO PROTECTOR: Si está conciliado, sáltalo de inmediato.
+    let estadoCobranza = String(fila[idxEstado] || "").trim().toLowerCase();
+    if (estadoCobranza === "conciliado") {
+      continue;
+    }
+    let clave = String(fila[idxAgente]).trim();
+    if (!clavesPermitidas.has(clave)) continue;
+
+    // =========================================================
+    // ✨ 1. DETECCIÓN DE PAGOS STRICTA (ANTES de checar la fecha)
+    let valEstado = idxEstado !== -1 ? String(fila[idxEstado]).toLowerCase() : "";
+    let valStatus = idxStatus !== -1 ? String(fila[idxStatus]).toLowerCase() : "";
+    let valNotas = idxNotas !== -1 ? String(fila[idxNotas]).toLowerCase() : "";
+
+    let esPagado = valEstado.includes("_pagado") || valEstado.includes("_aplicado") ||
+                   valStatus.includes("_pagado") || valStatus.includes("_aplicado") ||
+                   valNotas.includes("_pagado")  || valNotas.includes("_aplicado");
+    // =========================================================
+
+    // ✨ 2. EL FILTRO DE FECHAS CONDICIONADO
+    let fechaVigencia = new Date(fila[idxVigencia]);
+    let esViejo = (!isNaN(diasVista) && !isNaN(fechaVigencia.getTime()) && fechaVigencia < fechaCorte);
+
+    // Si es viejo y NO está pagado, lo botamos
+     if (esViejo && !esPagado) {
+       continue;
+      }
+
+    // ✨ LECTURA UNIFICADA
+    let textoComentario = idxComentario !== -1 ? String(fila[idxComentario]).toLowerCase() : "";
+    let textoNotas = idxNotas !== -1 ? String(fila[idxNotas]).toLowerCase() : "";
+    let textoGestiones = textoComentario + " " + textoNotas;
+
+    if (!fCancelado && varsCancelado.some(v => textoGestiones.includes(v))) continue;
+    if (!fCat && textoGestiones.includes('_cat')) continue;
+    if (!fIgnorar && textoGestiones.includes('_ignorar')) continue;
+    if (!fReexpedido && varsReexpedido.some(v => textoGestiones.includes(v))) continue;
+
+    //let esPagado = varsPagado.some(v => textoGestiones.includes(v));
+    // if (!fPagado && esPagado) continue; //desactivado para poder mover las pagadas a pestana "conciliar" 
+
+    let ramo = String(fila[idxRamo]).toUpperCase().trim();
+    let subramo = String(fila[idxSubramo]).toUpperCase().trim();
+    let vendedor = String(fila[idxVendedor]).toUpperCase();
+
+    let reporteDestino = null;
+    for (let cfg of configReportes) {
+      if (cfg.bloqueados !== "" && subramo.includes(cfg.bloqueados)) continue;
+      if (cfg.exclusivos !== "") {
+        if (subramo.includes(cfg.exclusivos)) { reporteDestino = cfg.nombre; break; }
+      } else {
+        if (cfg.ramos.includes(ramo)) { reporteDestino = cfg.nombre; break; }
+      }
+    }
+    
+    if (!reporteDestino) continue;
+
+    let isJMV = vendedor.includes("JULIETA MORALES");
+    let isEMV = vendedor.includes("ENRIQUE MORALES");
+    let isAGM = vendedor.includes("ANA MARIA GAMBOA");
+    let targetPrincipal = isJMV ? "JMV" : (isEMV ? "EMV" : (isAGM ? "AGM" : "SUBS"));
+
+    let dataObj = diccionarioReportes[reporteDestino];
+    
+    // Si fPagado está activo, los manda a conciliación en lugar de la hoja principal
+    if (esPagado) {
+    let targetConciliar = (isJMV || isEMV || isAGM) ? "Conciliar" : "Conciliar Subs";
+    dataObj[targetConciliar].push(fila);
+  
+      // ✨ AQUÍ ESTÁ LA MAGIA: Solo se va a la principal si NO es viejo
+      if (duplicarConciliados && !esViejo) {
+        dataObj[targetPrincipal].push(fila);
+      }
+    } else {
+      dataObj[targetPrincipal].push(fila);
+    }
+  }
+
+  // =========================================================================
+  // 3. PARAMETRIZACIÓN DE COLUMNAS A EXPORTAR
+  // =========================================================================
+  const columnasDeseadas = [
+    "Diferencia de días", "Cliente", "Póliza", "Endoso", "Moneda", "Aseguradora", 
+    "Ramo", "Inciso", "Subramo", "Serie recibo", "Total de recibos", 
+    "Vigencia inicial recibo", "Vigencia final recibo", "Fecha Vencimiento", "Total", 
+    "Diferencia de días", "Conducto", "Forma de Pago", "Concepto", "Clave de Agente", 
+    "Vendedor", "Comentario", "Fecha Bitacora", "Notas_Asistente"
+  ];
+  const indicesDeseados = columnasDeseadas.map(col => cabeceras.indexOf(col));
+
+  const mesesNombres = ["ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO", "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE"];
+  let hoy = new Date();
+  let aa = String(hoy.getFullYear());
+  let mm = String(hoy.getMonth() + 1).padStart(2, '0');
+  let dd = String(hoy.getDate()).padStart(2, '0');
+  let mesTexto = mesesNombres[hoy.getMonth()]; 
+
+  function getOrCreateFolder(padre, nombre) {
+    let carpetas = padre.getFoldersByName(nombre);
+    return carpetas.hasNext() ? carpetas.next() : padre.createFolder(nombre);
+  }
+
+  let baseFolder = null;
+  if (ubicacionALT !== "") {
+    baseFolder = DriveApp.getFolderById(ubicacionALT);
+  } else if (ubicacionBase !== "") {
+    baseFolder = DriveApp.getFolderById(ubicacionBase);
+  }
+
+  // =========================================================================
+  // 4. CREACIÓN DE ARCHIVOS Y FORMATO CONDICIONAL (Estilo Promotoría)
+  // =========================================================================
+  for (let cfg of configReportes) {
+    let reporteNombre = cfg.nombre;
+    let dataTabs = diccionarioReportes[reporteNombre];
+    
+    let tieneDatos = Object.values(dataTabs).some(arr => arr.length > 0);
+    if (!tieneDatos) {
+      console.log(`OMITIDO: El reporte ${reporteNombre} no tiene registros válidos.`);
+      continue;
+    }
+
+    let nombreArchivoFinal = `${mm} ${dd} ${mesTexto} ${reporteNombre}`;
+    let nuevoSpreadsheet = SpreadsheetApp.create(nombreArchivoFinal);
+    let idArchivo = nuevoSpreadsheet.getId();
+    let isFirstSheet = true;
+    
+    for (let tabName of ["JMV", "EMV", "AGM", "SUBS", "Conciliar", "Conciliar Subs"]) {
+      let filas = dataTabs[tabName];
+      if (filas.length === 0) continue; 
+
+      filas.sort((a, b) => (new Date(a[idxVigencia]).getTime() || 0) - (new Date(b[idxVigencia]).getTime() || 0));
+      
+      let nuevaHoja = isFirstSheet ? nuevoSpreadsheet.getSheets()[0] : nuevoSpreadsheet.insertSheet();
+      nuevaHoja.setName(tabName);
+      isFirstSheet = false;
+
+      let matrizExportacion = [columnasDeseadas];
+      for (let r = 0; r < filas.length; r++) {
+        let filaCruda = filas[r];
+        let filaNueva = indicesDeseados.map(idx => idx !== -1 ? filaCruda[idx] : "");
+        
+        filaNueva[0] = `=DAYS($L${r + 2}, TODAY())`;
+        filaNueva[15] = `=DAYS($L${r + 2}, TODAY())`; 
+
+        // ✨ Unificamos la nota de la IA en la columna de Comentarios (Índice 21) para el Formato Condicional
+        if (idxNotas !== -1 && filaCruda[idxNotas]) {
+          let notaOriginal = filaNueva[21] ? filaNueva[21] + " | " : "";
+          filaNueva[21] = notaOriginal + String(filaCruda[idxNotas]);
+        }
+        
+        matrizExportacion.push(filaNueva);
+      }
+
+      nuevaHoja.getRange(1, 1, matrizExportacion.length, columnasDeseadas.length).setValues(matrizExportacion);
+      nuevaHoja.getRange(1, 1, 1, columnasDeseadas.length).setFontWeight("bold").setBackground("#e0e0e0");
+
+      let numFilas = filas.length;
+      nuevaHoja.getRange(2, 1, numFilas, 1).setNumberFormat("0");
+      nuevaHoja.getRange(2, 16, numFilas, 1).setNumberFormat("0");
+      nuevaHoja.getRange(2, 12, numFilas, 3).setNumberFormat("yyyy-MM-dd");
+      nuevaHoja.getRange(2, 23, numFilas, 1).setNumberFormat("yyyy-MM-dd"); 
+      nuevaHoja.getRange(2, 15, numFilas, 1).setNumberFormat("$#,##0.00"); 
+
+      // ✨ FORMATO CONDICIONAL PERFECCIONADO
+      let rules = [];
+      let rangoCompleto = nuevaHoja.getRange(2, 1, numFilas, columnasDeseadas.length);
+      let rangoVendedor = nuevaHoja.getRange(2, 21, numFilas, 1);
+      let rangoNotas = nuevaHoja.getRange(2, 24, numFilas, 1);
+
+      // El rojo de "(D)" aplica SOLO a la celda del vendedor
+      rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=ISNUMBER(SEARCH("(D)", $U2))`).setBackground("#f4cccc").setRanges([rangoVendedor]).build());
+      // Negritas en Notas_Asistente
+      rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=AND($X2<>"", $X2<>$V2)`).setBold(true).setRanges([rangoNotas]).build());
+      
+      /* fragmento remplazado para mejorar formateo de de filas
+       Prioridad de etiquetas manuales o de IA en la fila completa
+      rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=ISNUMBER(SEARCH("_espera", $V2))`).setFontColor("#e69138").setBackground("#ffffff").setRanges([rangoCompleto]).build());
+      rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=ISNUMBER(SEARCH("promesa", $V2))`).setFontColor("#38761d").setBackground("#ffffff").setRanges([rangoCompleto]).build());
+      
+      // ✨ Colores de Diferencia de días APLICADOS A TODA LA FILA (como en Promotoría)
+      rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=$A2<=-31`).setBackground("#f4cccc").setRanges([rangoCompleto]).build());
+      rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=AND($A2>=-30, $A2<=-1)`).setBackground("#fff2cc").setRanges([rangoCompleto]).build());
+      rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=$A2=0`).setFontColor("#741b47").setRanges([rangoCompleto]).build());
+
+      nuevaHoja.setConditionalFormatRules(rules);
+      nuevaHoja.autoResizeColumns(1, 24);
+      nuevaHoja.hideColumns(22); // Ocultar Comentario Original (Columna V)*/
+
+        // =========================================================================
+        // ✨ PIRÁMIDE DE REGLAS DE FORMATO CONDICIONAL
+        // =========================================================================
+
+        // 1. REGLA MAESTRA: Si hay MÁS de 1 etiqueta -> Eliminar formato (Letra negra, fondo blanco)
+        // Fórmula Larga Inactiva (con Notas_Asistente $X2): let fMasterLarga = `=(--OR(ISNUMBER(SEARCH("_pagad",$V2)),ISNUMBER(SEARCH("_aplicad",$V2)),ISNUMBER(SEARCH("_pagad",$X2)),ISNUMBER(SEARCH("_aplicad",$X2))) + --OR(ISNUMBER(SEARCH("promesa",$V2)),ISNUMBER(SEARCH("promesa",$X2))) + --OR(ISNUMBER(SEARCH("_cat",$V2)),ISNUMBER(SEARCH("_cat",$X2))) + --OR(ISNUMBER(SEARCH("_cancelad",$V2)),ISNUMBER(SEARCH("_reexpedid",$V2)),ISNUMBER(SEARCH("_pt",$V2)),ISNUMBER(SEARCH("_cancelad",$X2)),ISNUMBER(SEARCH("_reexpedid",$X2)),ISNUMBER(SEARCH("_pt",$X2))) + --OR(ISNUMBER(SEARCH("_espera",$V2)),ISNUMBER(SEARCH("_espera",$X2)))) > 1`;
+        let formulaMaster = `=(--OR(ISNUMBER(SEARCH("_pagad",$V2)),ISNUMBER(SEARCH("_aplicad",$V2))) + --ISNUMBER(SEARCH("promesa",$V2)) + --ISNUMBER(SEARCH("_cat",$V2)) + --OR(ISNUMBER(SEARCH("_cancelad",$V2)),ISNUMBER(SEARCH("_reexpedid",$V2)),ISNUMBER(SEARCH("_pt",$V2))) + --ISNUMBER(SEARCH("_espera",$V2))) > 1`;
+        rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(formulaMaster).setFontColor("#000000").setBackground("#ffffff").setRanges([rangoCompleto]).build());
+
+        // 2. PROMESA -> Fondo Light Blue 3 (#cfe2f3)
+        rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=ISNUMBER(SEARCH("promesa", $V2))`).setFontColor("#000000").setBackground("#cfe2f3").setRanges([rangoCompleto]).build());
+
+        // 3. PAGADO / APLICADO -> Fondo Light Green (#d9ead3) (Excluyendo pestañas de Conciliar)
+        if (!tabName.includes("Conciliar")) {
+          // Fórmula Larga Inactiva: let fPagadoLarga = `=OR(ISNUMBER(SEARCH("_pagad", $V2)), ISNUMBER(SEARCH("_aplicad", $V2)), ISNUMBER(SEARCH("_pagad", $X2)), ISNUMBER(SEARCH("_aplicad", $X2)))`;
+          let formulaPagado = `=OR(ISNUMBER(SEARCH("_pagad", $V2)), ISNUMBER(SEARCH("_aplicad", $V2)))`;
+          rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(formulaPagado).setFontColor("#000000").setBackground("#d9ead3").setRanges([rangoCompleto]).build());
+        }
+
+        // 4. CAT -> Fondo Light Cyan (#e0ffff)
+        rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=ISNUMBER(SEARCH("_cat", $V2))`).setFontColor("#000000").setBackground("#e0ffff").setRanges([rangoCompleto]).build());
+
+        // 5. BLOQUE CANCELADOS (_cancelado, _reexpedido, _pt) -> Letra Roja Viva combinada con Fondos de Atraso
+        let baseCancelado = `OR(ISNUMBER(SEARCH("_cancelad", $V2)), ISNUMBER(SEARCH("_reexpedid", $V2)), ISNUMBER(SEARCH("_pt", $V2)))`;
+        // Combo A: <= -31 días (Fondo Rojo Claro)
+        rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=AND(${baseCancelado}, $A2<=-31)`).setFontColor("#ff0000").setBackground("#f4cccc").setRanges([rangoCompleto]).build());
+        // Combo B: -30 a -1 días (Fondo Amarillo)
+        rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=AND(${baseCancelado}, $A2>=-30, $A2<=-1)`).setFontColor("#ff0000").setBackground("#fff2cc").setRanges([rangoCompleto]).build());
+        // Combo C: Demás casos (0 días o sin atraso - Fondo Blanco)
+        rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=${baseCancelado}`).setFontColor("#ff0000").setBackground("#ffffff").setRanges([rangoCompleto]).build());
+
+        // 6. ESPERA -> Texto Naranja, Fondo Blanco (Ignora días de atraso)
+        rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=ISNUMBER(SEARCH("_espera", $V2))`).setFontColor("#e69138").setBackground("#ffffff").setRanges([rangoCompleto]).build());
+
+        // 7. DÍAS DE ATRASO PUROS (Aplica si no hay ninguna etiqueta superior)
+        rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=$A2<=-31`).setBackground("#f4cccc").setRanges([rangoCompleto]).build());
+        rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=AND($A2>=-30, $A2<=-1)`).setBackground("#fff2cc").setRanges([rangoCompleto]).build());
+        rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=$A2=0`).setFontColor("#741b47").setRanges([rangoCompleto]).build());
+
+        nuevaHoja.setConditionalFormatRules(rules);
+        nuevaHoja.autoResizeColumns(1, 24);
+        
+        // ✨ Visibilidad de Columnas Modificada:
+        // Se mantiene visible la columna 22 (Comentario original)
+        nuevaHoja.hideColumns(23); // Oculta Fecha Bitacora (Columna W)
+        nuevaHoja.hideColumns(24); // Oculta Notas_Asistente (Columna X)
+
+    }
+
+    SpreadsheetApp.flush();
+    if (baseFolder) {
+      let archivoDrive = DriveApp.getFileById(idArchivo);
+      let carpetaDestino = null;
+      if (ubicacionALT !== "") {
+        carpetaDestino = baseFolder;
+      } else {
+        let folderYear = getOrCreateFolder(baseFolder, aa);
+        let folderRep = getOrCreateFolder(folderYear, "REPORTES COBRANZA");
+        let folderRamo = getOrCreateFolder(folderRep, reporteNombre);
+        let nombreCarpetaMes = `${mm} ${mesTexto}`; 
+        carpetaDestino = getOrCreateFolder(folderRamo, nombreCarpetaMes);
+      }
+      archivoDrive.moveTo(carpetaDestino);
+    }
+    console.log(`ÉXITO: Reporte [${nombreArchivoFinal}] creado.`);
+    Utilities.sleep(3000); // 😴 Pausa de 3 segundos para que Google Sheets respire
+
+    // =========================================================================
+    // 5. ENVÍO DE CORREOS (Enlace a Google Sheets)
+    // =========================================================================
+    if (enviarEmails && cfg.emails !== "" && cfg.emails !== "undefined") {
+      try {
+        let asunto = `Reporte Actualizado de Cobranza: ${reporteNombre}`;
+        let linkArchivo = nuevoSpreadsheet.getUrl();
+        let mensaje = `Hola,\n\nSe ha generado/actualizado el reporte de cobranza para ${reporteNombre}.\n\nPuedes consultar el reporte directamente en Google Sheets haciendo clic en el siguiente enlace:\n${linkArchivo}\n\nSaludos,\nEquipo de Operaciones.`;
+        GmailApp.sendEmail(cfg.emails, asunto, mensaje);
+        console.log(`CORREO ENVIADO para ${reporteNombre} a: ${cfg.emails}`);
+      } catch (e) {
+        console.error(`Error al enviar correo para ${reporteNombre}: ${e.message}`);
+      }
+    }
+  }
+// =========================================================================
+  // 5.5 REPORTE CONSOLIDADO DE "CONCILIAR SUBS" PARA PROMOTORÍA
+  // =========================================================================
+  let tieneDatosSubs = false;
+  let spreadsheetSubs = null;
+  let isFirstSheetSubs = true;
+  let nombreArchivoSubs = `${mm} ${dd} ${mesTexto} REPORTE CONCILIAR SUBS`;
+
+  // Recorremos todos los ramos de nuevo, pero ahora solo sacamos la carnita de "Conciliar Subs"
+  for (let cfg of configReportes) {
+    let reporteNombre = cfg.nombre;
+    let filasSubs = diccionarioReportes[reporteNombre]["Conciliar Subs"];
+
+    if (filasSubs && filasSubs.length > 0) {
+      // Si es el primer ramo con datos, creamos el archivo maestro
+      if (!tieneDatosSubs) {
+        spreadsheetSubs = SpreadsheetApp.create(nombreArchivoSubs);
+        tieneDatosSubs = true;
+      }
+
+      // Ordenamos por fecha
+      filasSubs.sort((a, b) => (new Date(a[idxVigencia]).getTime() || 0) - (new Date(b[idxVigencia]).getTime() || 0));
+
+      // Creamos una pestaña con el nombre del Ramo
+      let nuevaHoja = isFirstSheetSubs ? spreadsheetSubs.getSheets()[0] : spreadsheetSubs.insertSheet();
+      nuevaHoja.setName(reporteNombre);
+      isFirstSheetSubs = false;
+
+      // Preparamos la matriz de datos con las fórmulas de Días
+      let matrizExportacion = [columnasDeseadas];
+      for (let r = 0; r < filasSubs.length; r++) {
+        let filaCruda = filasSubs[r];
+        let filaNueva = indicesDeseados.map(idx => idx !== -1 ? filaCruda[idx] : "");
+        
+        filaNueva[0] = `=DAYS($L${r + 2}, TODAY())`;
+        filaNueva[15] = `=DAYS($L${r + 2}, TODAY())`; 
+        
+        if (idxNotas !== -1 && filaCruda[idxNotas]) {
+          let notaOriginal = filaNueva[21] ? filaNueva[21] + " | " : "";
+          filaNueva[21] = notaOriginal + String(filaCruda[idxNotas]);
+        }
+        matrizExportacion.push(filaNueva);
+      }
+
+      // Inyectamos datos y formato básico
+      nuevaHoja.getRange(1, 1, matrizExportacion.length, columnasDeseadas.length).setValues(matrizExportacion);
+      nuevaHoja.getRange(1, 1, 1, columnasDeseadas.length).setFontWeight("bold").setBackground("#e0e0e0");
+      
+      let numFilas = filasSubs.length;
+      nuevaHoja.getRange(2, 1, numFilas, 1).setNumberFormat("0");
+      nuevaHoja.getRange(2, 16, numFilas, 1).setNumberFormat("0");
+      nuevaHoja.getRange(2, 12, numFilas, 3).setNumberFormat("yyyy-MM-dd");
+      nuevaHoja.getRange(2, 23, numFilas, 1).setNumberFormat("yyyy-MM-dd"); 
+      nuevaHoja.getRange(2, 15, numFilas, 1).setNumberFormat("$#,##0.00"); 
+
+      // Al ser todos "Pagados", le ponemos el fondo verde de rigor a toda la fila
+      let rangoCompleto = nuevaHoja.getRange(2, 1, numFilas, columnasDeseadas.length);
+      let rules = [];
+      let formulaPagado = `=OR(ISNUMBER(SEARCH("_pagad", $V2)), ISNUMBER(SEARCH("_aplicad", $V2)))`;
+      rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(formulaPagado).setFontColor("#000000").setBackground("#d9ead3").setRanges([rangoCompleto]).build());
+      nuevaHoja.setConditionalFormatRules(rules);
+
+      nuevaHoja.autoResizeColumns(1, 24);
+      nuevaHoja.hideColumns(23); // Ocultar Fecha Bitacora
+      nuevaHoja.hideColumns(24); // Ocultar Notas_Asistente
+    }
+  }
+
+  // Si encontramos al menos un registro en algún ramo, guardamos y enviamos
+  if (tieneDatosSubs) {
+    SpreadsheetApp.flush();
+    if (baseFolder) {
+      DriveApp.getFileById(spreadsheetSubs.getId()).moveTo(baseFolder);
+    }
+    console.log(`ÉXITO: Reporte consolidado [${nombreArchivoSubs}] creado en Drive.`);
+
+    // 📧 Enviar a Promotoría con el Excel adjunto
+    if (enviarEmails) {
+      try {
+        let urlExport = `https://docs.google.com/spreadsheets/d/${spreadsheetSubs.getId()}/export?format=xlsx`;
+        let blob = UrlFetchApp.fetch(urlExport, {headers:{Authorization:"Bearer "+ScriptApp.getOAuthToken()}}).getBlob().setName(nombreArchivoSubs + ".xlsx");
+        GmailApp.sendEmail("promotoria@1seguros.mx", `🟢 REPORTE CONCILIAR SUBS: ${prefijo || mm + " " + dd}`, "Adjunto encontrarás el reporte consolidado de pagos aplicados por subagentes para su conciliación.", {attachments:[blob]});
+        console.log(`CORREO ENVIADO: Conciliar Subs a promotoria@1seguros.mx`);
+      } catch (e) {
+        console.error(`Error enviando correo Conciliar Subs: ${e.message}`);
+      }
+    }
+  } else {
+    console.log(`INFO: Hoy no hubo recibos para Conciliar Subs, no se generó el reporte consolidado.`);
+  }
+  
+  // =========================================================================
+  // 6. RESTAURACIÓN DE INTERRUPTORES (CLEANUP)
+  // =========================================================================
+  hojaConfig.getRange("B14").setValue(true); // Re-armar el seguro
+  hojaConfig.getRange("B16").setValue(true);
+  if (ubicacionALT !== "") {
+    hojaConfig.getRange("B18").clearContent(); 
+  }
+
+  console.log(`PROCESO JMV FINALIZADO CORRECTAMENTE.`);
+}
+
+/** Crea o busca una ruta de carpetas dinámicas basadas en la fecha actual y el vendedor.
+ * Ruta: CarpetaRaíz / Año / MM Mes / DD Mes / Vendedor
+ */
+function obtenerOCrearRutaDinamica(folderRaizId, nombreVendedor) {
+  let carpetaActual = DriveApp.getFolderById(folderRaizId);
+  const fecha = new Date();
+  
+  // 1. Array de meses en español para los nombres de carpetas
+  const meses = [
+    "01 Enero", "02 Febrero", "03 Marzo", "04 Abril", "05 Mayo", "06 Junio",
+    "07 Julio", "08 Agosto", "09 Septiembre", "10 Octubre", "11 Noviembre", "12 Diciembre"
+  ];
+  
+  // 2. Obtener valores de fecha
+  const anioStr = fecha.getFullYear().toString();                       // "2026"
+  const mesStr = meses[fecha.getMonth()];                               // "05 Mayo"
+  const diaStr = `${fecha.getDate().toString().padStart(2, '0')} ${mesStr.split(' ')[1]}`; // "20 Mayo"
+  
+  // 3. Estructura de niveles a verificar/crear
+  const niveles = [anioStr, mesStr, diaStr, nombreVendedor.trim()];
+  
+  // 4. Ciclo ninja que navega o crea nivel por nivel
+  for (let i = 0; i < niveles.length; i++) {
+    let nombreNivel = niveles[i];
+    let subCarpetas = carpetaActual.getFoldersByName(nombreNivel);
+    
+    if (subCarpetas.hasNext()) {
+      carpetaActual = subCarpetas.next(); // Si ya existe, nos metemos a ella
+    } else {
+      carpetaActual = carpetaActual.createFolder(nombreNivel); // Si no existe, la crea y nos metemos
+    }
+  }
+  
+  return carpetaActual.getId(); // Regresa el ID de la carpeta final (la del vendedor)
+}
+
+/** Crea o busca una ruta de carpetas dinámicas basadas en la fecha actual para el Reporte Global.
+ * Ruta: CarpetaRaíz / Año / MM Mes / DD Mes
+ */
+function obtenerOCrearRutaGlobalDinamica(folderRaizId) {
+  let carpetaActual = DriveApp.getFolderById(folderRaizId);
+  const fecha = new Date();
+
+  // Array de meses en español
+  const meses = [
+    "01 Enero", "02 Febrero", "03 Marzo", "04 Abril", "05 Mayo", "06 Junio",
+    "07 Julio", "08 Agosto", "09 Septiembre", "10 Octubre", "11 Noviembre", "12 Diciembre"
+  ];
+
+  // Obtener valores de fecha
+  const anioStr = fecha.getFullYear().toString();
+  const mesStr = meses[fecha.getMonth()];
+  const diaStr = `${fecha.getDate().toString().padStart(2, '0')} ${mesStr.split(' ')[1]}`;
+
+  // Estructura de niveles: Año -> Mes -> Día (sin vendedor)
+  const niveles = [anioStr, mesStr, diaStr];
+
+  for (let i = 0; i < niveles.length; i++) {
+    let nombreNivel = niveles[i];
+    let subCarpetas = carpetaActual.getFoldersByName(nombreNivel);
+
+    if (subCarpetas.hasNext()) {
+      carpetaActual = subCarpetas.next();
+    } else {
+      carpetaActual = carpetaActual.createFolder(nombreNivel);
+    }
+  }
+
+  return carpetaActual.getId(); // Regresa el ID de la carpeta del Día
+}
+
+/** GENERADOR DE REPORTES INDIVIDUALES (AGENTES PROMOTORÍA)
+ * Versión: Formatos visuales, redondeo de días y LOGS RESTAURADOS.*/
+function generarReportesIndividualesPromotoria() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const hojaMaestra = ss.getSheetByName('BD_Cobranza');
+  const hojaCatVendedores = ss.getSheetByName('Catalogo_vendedores');
+  const hojaConfig = ss.getSheetByName('Config');
+  
+  if (!hojaMaestra || !hojaCatVendedores || !hojaConfig) return console.error("Faltan pestañas requeridas.");
+
+  const esActivo = (valor) => {
+    let v = String(valor).trim().toUpperCase();
+    return (v === "TRUE" || v === "VERDADERO" || v === "1");
+  };
+
+  // Configuración
+  const diasVista = parseInt(hojaConfig.getRange("B3").getValue());
+  const coloreaReportes = esActivo(hojaConfig.getRange("B4").getValue());
+  const enviarEmails = esActivo(hojaConfig.getRange("B5").getValue());
+  const ubicacionGlobal = String(hojaConfig.getRange("B6").getValue() || "").trim();
+  //const fPagado = esActivo(hojaConfig.getRange("B7").getValue()); //desactivado para poder mover las pagadas a pestana "conciliar"
+  const fCancelado = esActivo(hojaConfig.getRange("B8").getValue());
+  const fCat = esActivo(hojaConfig.getRange("B9").getValue());
+  const fIgnorar = esActivo(hojaConfig.getRange("B10").getValue());
+  const fReexpedido = esActivo(hojaConfig.getRange("B11").getValue());
+  const cEspera = esActivo(hojaConfig.getRange("B12").getValue());
+  const cPromesa = esActivo(hojaConfig.getRange("B13").getValue());
+  const validarFecha = esActivo(hojaConfig.getRange("B14").getValue());
+
+  // SEGURO DE FECHA
+  if (validarFecha) {
+    const ID_CARPETA_HISTORIAL = '1rRlxxqukHsWwa-BGBQcH6-KA7EyHzo7e';
+    let masReciente = DriveApp.getFolderById(ID_CARPETA_HISTORIAL).getFilesByType(MimeType.MICROSOFT_EXCEL);
+    let archivoHoy = null;
+    while(masReciente.hasNext()){
+      let f = masReciente.next();
+      if(f.getName().toLowerCase().endsWith('.xlsx') && (!archivoHoy || f.getDateCreated() > archivoHoy.getDateCreated())) archivoHoy = f;
+    }
+    if (!archivoHoy || new Date().toDateString() !== archivoHoy.getDateCreated().toDateString()) {
+      return console.error("🛑 ERROR: Base de datos no actualizada hoy. Reportes individuales abortados.");
+    }
+  }
+
+  // Mapeo de Vendedores
+  const mapaConfig = new Map();
+  const datosCat = hojaCatVendedores.getDataRange().getValues();
+  for (let i = 1; i < datosCat.length; i++) {
+    let vend = String(datosCat[i][2]).trim();
+    if (vend) mapaConfig.set(vend, { id: String(datosCat[i][4] || "").trim(), mail: String(datosCat[i][5] || "").trim() });
+  }
+
+ // Extracción
+  const datos = hojaMaestra.getDataRange().getValues();
+  const cab = datos[0];
+  const idxVendedor = cab.indexOf('Vendedor');
+  const idxGrupo = cab.indexOf('Grupo');
+  const idxVigencia = cab.indexOf('Vigencia inicial recibo');
+  const idxCom = cab.indexOf('Comentario');
+  const idxNot = cab.indexOf('Notas_Asistente');
+  const idxEstado = cab.indexOf('Estado_Cobranza'); // ✨ Mapeo asegurado
+
+  const varsCancelado = ['_cancelado', '_cancelada', '_pt'];
+  const varsReexpedido = ['_reexpedido', '_reexpedida'];
+  const dict = new Map();
+
+  for (let i = 1; i < datos.length; i++) {
+    let fila = datos[i];
+    
+    // ✨ ESCUDO PROTECTOR INFALIBLE
+    let estadoCobranza = String(fila[idxEstado] || "").trim().toLowerCase();
+    if (estadoCobranza === "conciliado") {
+      continue;
+    }
+
+    // 🛡️ FILTRO DE GRUPO PROMOTORÍA
+    if (!String(fila[idxGrupo]).toLowerCase().includes('promotoria')) {
+      continue;
+    }
+
+    let vend = String(fila[idxVendedor]).trim();
+    let texto = (String(fila[idxCom]) + " " + String(fila[idxNot])).toLowerCase();
+
+    // ❌ Filtros de visualización (Sin el fPagado que tronaba)
+    if (
+      (!fCancelado && varsCancelado.some(v => texto.includes(v))) ||
+      (!fReexpedido && varsReexpedido.some(v => texto.includes(v))) ||
+      (!fCat && texto.includes('_cat')) ||
+      (!fIgnorar && texto.includes('_ignorar'))
+    ) {
+      continue;
+    }
+
+    let fVig = new Date(fila[idxVigencia]);
+    let fCorte = new Date(); 
+    fCorte.setDate(fCorte.getDate() - diasVista);
+    
+    if (fVig < fCorte) {
+      continue;
+    }
+
+    if (!dict.has(vend)) dict.set(vend, []);
+    dict.get(vend).push(fila);
+  }
+
+  // Generación
+  const cols = ["Diferencia de días", "Cliente", "Póliza", "Aseguradora", "Serie recibo", "Total de recibos", "Forma de Pago", "Ramo", "Vigencia inicial recibo", "Vigencia final recibo", "Conducto", "Total", "Concepto", "Comentario"];
+  const idxs = cols.map(c => cab.indexOf(c));
+  let prefijo = Utilities.formatDate(new Date(), "GMT-6", "yyMMMMMdd").toUpperCase();
+
+  for (let [nombre, filas] of dict) {
+    if (!mapaConfig.has(nombre)) continue;
+    filas.sort((a,b) => new Date(a[idxVigencia]) - new Date(b[idxVigencia]));
+    let matriz = [cols];
+    
+    filas.forEach((f, r) => {
+      let n = idxs.map(idx => idx !== -1 ? f[idx] : "");
+      n[0] = `=ROUNDUP(I${r+2}-TODAY(), 0)`;
+      if (idxNot !== -1 && f[idxNot]) n[13] = (n[13] ? n[13] + " | " : "") + String(f[idxNot]);
+      matriz.push(n);
+    });
+
+    let config = mapaConfig.get(nombre);
+    let ssN = SpreadsheetApp.create(`${prefijo} Cobranza ${nombre}`);
+    let hoja = ssN.getSheets()[0];
+    hoja.getRange(1,1,matriz.length, cols.length).setValues(matriz);
+    
+    // Formato
+    hoja.getRange(1,1,1,cols.length).setFontWeight("bold").setBackground("#e0e0e0");
+    if (filas.length > 0) {
+      hoja.getRange(2,1,filas.length,1).setNumberFormat("0"); 
+      hoja.getRange(2,9,filas.length,2).setNumberFormat("yyyy-MM-dd");
+      hoja.getRange(2,12,filas.length,1).setNumberFormat("$#,##0.00");
+      
+      let range = hoja.getRange(2,1,filas.length,cols.length);
+      let rules = [];
+      
+      // A. Etiquetas de "Resuelto" (Pagado, Cancelado, Reexpedido)
+      rules.push(SpreadsheetApp.newConditionalFormatRule()
+        .whenFormulaSatisfied(`=OR(ISNUMBER(SEARCH("_pagad", $N2)), ISNUMBER(SEARCH("_aplicad", $N2)), ISNUMBER(SEARCH("_cancelad", $N2)), ISNUMBER(SEARCH("_pt", $N2)), ISNUMBER(SEARCH("_reexpedid", $N2)))`)
+        .setFontColor("#999999").setBackground("#ffffff").setRanges([range]).build());
+
+      // B. Etiquetas de "Trámite" (Espera y Promesa) con fondo blanco
+      if (cEspera) rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=ISNUMBER(SEARCH("_espera", $N2))`).setFontColor("#e69138").setBackground("#ffffff").setRanges([range]).build());
+      if (cPromesa) rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=ISNUMBER(SEARCH("promesa", $N2))`).setFontColor("#38761d").setBackground("#ffffff").setRanges([range]).build());
+      
+      // C. Colores de Urgencia
+      if (coloreaReportes) {
+        rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=$A2<=-31`).setBackground("#f4cccc").setRanges([range]).build());
+        rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=AND($A2>=-30, $A2<=-1)`).setBackground("#fff2cc").setRanges([range]).build());
+        rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=$A2=0`).setFontColor("#741b47").setRanges([range]).build());
+      }
+      
+      if (rules.length > 0) hoja.setConditionalFormatRules(rules);
+    }
+    
+    hoja.autoResizeColumns(1, 13);
+    hoja.hideColumns(14);
+    SpreadsheetApp.flush();
+    
+    // 📂 DETERMINAR CARPETA DESTINO (Ruta Dinámica o Individual)
+    let carpetaDestinoId = config.id; // Por defecto la individual del catálogo
+    
+    if (ubicacionGlobal !== "") {
+      // Si B6 tiene un ID, calculamos la ruta Año\Mes\Día\Vendedor
+      carpetaDestinoId = obtenerOCrearRutaDinamica(ubicacionGlobal, nombre);
+    }
+    
+    // Movemos el archivo a la carpeta destino calculada
+    DriveApp.getFileById(ssN.getId()).moveTo(DriveApp.getFolderById(carpetaDestinoId));
+
+     // ✨ LOG RESTAURADO AQUÍ
+    console.log(`ÉXITO: Reporte de ${nombre} generado en carpeta ID: ${carpetaDestinoId}`);
+
+    if (enviarEmails && config.mail) {
+      let blob = UrlFetchApp.fetch(`https://docs.google.com/spreadsheets/d/${ssN.getId()}/export?format=xlsx`, {headers:{Authorization:"Bearer "+ScriptApp.getOAuthToken()}}).getBlob().setName(`${prefijo} Cobranza ${nombre}.xlsx`);
+      GmailApp.sendEmail(config.mail, `Reporte Cobranza: ${nombre}`, "Adjunto reporte actualizado.", {
+      bcc: "promotoria@1seguros.mx", 
+      attachments: [blob],
+      from: "promotoria@1seguros.mx"
+      });
+    }
+  }
+  
+  hojaConfig.getRange("B14").setValue(true);
+  console.log("✅ Reportes Individuales finalizados con formatos correctos.");
+}
+
+/** GENERADOR DE REPORTE GLOBAL MAESTRO (PROMOTORÍA)
+ * Versión: Filtros activos, redondeo y prioridades de Formato Visual corregidas.
+ */
+function generarReporteGlobalPromotoria() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const hojaMaestra = ss.getSheetByName('BD_Cobranza');
+  const hojaConfig = ss.getSheetByName('Config');
+  
+  const esActivo = (valor) => {
+    let v = String(valor).trim().toUpperCase();
+    return (v === "TRUE" || v === "VERDADERO" || v === "1");
+  };
+
+  // 1. CARGA DE CONFIGURACIÓN Y FILTROS
+  const idCarpetaGlobal = String(hojaConfig.getRange("B20").getValue() || "").trim();
+  const enviarGlobal = esActivo(hojaConfig.getRange("B21").getValue());
+  const validarFecha = esActivo(hojaConfig.getRange("B14").getValue());
+  const diasVista = parseInt(hojaConfig.getRange("B3").getValue());
+  
+  const coloreaReportes = esActivo(hojaConfig.getRange("B4").getValue());
+  const fPagado = esActivo(hojaConfig.getRange("B7").getValue());
+  const fCancelado = esActivo(hojaConfig.getRange("B8").getValue());
+  const fCat = esActivo(hojaConfig.getRange("B9").getValue());
+  const fIgnorar = esActivo(hojaConfig.getRange("B10").getValue());
+  const fReexpedido = esActivo(hojaConfig.getRange("B11").getValue());
+  const cEspera = esActivo(hojaConfig.getRange("B12").getValue());
+  const cPromesa = esActivo(hojaConfig.getRange("B13").getValue());
+
+  if (!idCarpetaGlobal) return console.error("Falta ID Carpeta Global en B20.");
+
+  // SEGURO DE FECHA
+  if (validarFecha) {
+    const ID_CARPETA_HISTORIAL = '1rRlxxqukHsWwa-BGBQcH6-KA7EyHzo7e';
+    let masReciente = DriveApp.getFolderById(ID_CARPETA_HISTORIAL).getFilesByType(MimeType.MICROSOFT_EXCEL);
+    let archivoHoy = null;
+    while(masReciente.hasNext()){
+      let f = masReciente.next();
+      if(f.getName().toLowerCase().endsWith('.xlsx') && (!archivoHoy || f.getDateCreated() > archivoHoy.getDateCreated())) archivoHoy = f;
+    }
+    if (!archivoHoy || new Date().toDateString() !== archivoHoy.getDateCreated().toDateString()) {
+      return console.error("🛑 ERROR: Base de datos no actualizada hoy. Reporte Global abortado.");
+    }
+  }
+
+  // 2. EXTRACCIÓN CON FILTROS ACTIVOS
+  const datos = hojaMaestra.getDataRange().getValues();
+  const cab = datos[0];
+  const idxVendedor = cab.indexOf('Vendedor'), idxGrupo = cab.indexOf('Grupo'), idxVigencia = cab.indexOf('Vigencia inicial recibo'), idxCom = cab.indexOf('Comentario'), idxNot = cab.indexOf('Notas_Asistente'), idxEstado = cab.indexOf('Estado_Cobranza');
+  
+  const varsPagado = ['_pagado', '_pagada', '_aplicado', '_aplicada'], varsCancelado = ['_cancelado', '_cancelada', '_pt'], varsReexpedido = ['_reexpedido', '_reexpedida'];
+  let filasGlobal = [];
+
+  for (let i = 1; i < datos.length; i++) {
+    let fila = datos[i];
+    // ✨ ESCUDO PROTECTOR: Si está conciliado, ni lo leas, sáltalo.
+    let estadoCobranza = String(fila[idxEstado] || "").trim().toLowerCase();
+    if (estadoCobranza === "conciliado") continue;
+    let vend = String(fila[idxVendedor]).trim();
+    
+    if (!String(fila[idxGrupo]).toLowerCase().includes('promotoria') || vend.toUpperCase().includes("(D)")) continue;
+
+    let texto = (String(fila[idxCom]) + " " + String(fila[idxNot])).toLowerCase();
+    
+    if (
+      (!fPagado && varsPagado.some(v => texto.includes(v))) || 
+      (!fCancelado && varsCancelado.some(v => texto.includes(v))) || 
+      (!fReexpedido && varsReexpedido.some(v => texto.includes(v))) || 
+      (!fCat && texto.includes('_cat')) || 
+      (!fIgnorar && texto.includes('_ignorar'))
+    ) continue;
+    
+    let fVig = new Date(fila[idxVigencia]);
+    let fCorte = new Date(); fCorte.setDate(fCorte.getDate() - diasVista);
+    if (fVig < fCorte) continue;
+
+    filasGlobal.push(fila);
+  }
+
+  if (filasGlobal.length === 0) return console.log("No hay datos para el reporte global.");
+
+  // 3. GENERACIÓN DE MATRIZ
+  const colsG = ["Diferencia de días", "Vendedor", "Cliente", "Póliza", "Aseguradora", "Serie recibo", "Total de recibos", "Forma de Pago", "Ramo", "Vigencia inicial recibo", "Vigencia final recibo", "Conducto", "Total", "Concepto", "Comentario"];
+  const idxsG = colsG.map(c => cab.indexOf(c));
+  let prefijo = Utilities.formatDate(new Date(), "GMT-6", "yyMMMMMdd").toUpperCase();
+  let nombreArchivo = `${prefijo} Reporte Global Seguimiento`;
+
+  filasGlobal.sort((a,b) => new Date(a[idxVigencia]) - new Date(b[idxVigencia]));
+  
+  let matrizG = [colsG];
+  filasGlobal.forEach((f, r) => {
+    let n = idxsG.map(idx => idx !== -1 ? f[idx] : "");
+    n[0] = `=ROUNDUP(J${r+2}-TODAY(), 0)`; 
+    if (idxNot !== -1 && f[idxNot]) n[14] = (n[14] ? n[14] + " | " : "") + String(f[idxNot]);
+    matrizG.push(n);
+  });
+
+  // 4. CREACIÓN Y FORMATO
+  let ssGlobal = SpreadsheetApp.create(nombreArchivo);
+  let hojaG = ssGlobal.getSheets()[0];
+  hojaG.getRange(1,1,matrizG.length, colsG.length).setValues(matrizG);
+  hojaG.getRange(1,1,1,colsG.length).setFontWeight("bold").setBackground("#cfe2f3");
+  
+  if (filasGlobal.length > 0) {
+    hojaG.getRange(2,1,filasGlobal.length,1).setNumberFormat("0"); 
+    hojaG.getRange(2,10,filasGlobal.length,2).setNumberFormat("yyyy-MM-dd");
+    hojaG.getRange(2,13,filasGlobal.length,1).setNumberFormat("$#,##0.00");
+    
+    let rangeG = hojaG.getRange(2,1,filasGlobal.length,colsG.length);
+    let rules = [];
+    
+    // ✨ REGLAS DE FORMATO VISUAL MEJORADAS Y ORDENADAS
+    
+    // A. Etiquetas de "Resuelto" (Pagado, Cancelado, Reexpedido) -> Texto gris, fondo blanco
+    rules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(`=OR(ISNUMBER(SEARCH("_pagad", $O2)), ISNUMBER(SEARCH("_aplicad", $O2)), ISNUMBER(SEARCH("_cancelad", $O2)), ISNUMBER(SEARCH("_pt", $O2)), ISNUMBER(SEARCH("_reexpedid", $O2)))`)
+      .setFontColor("#999999").setBackground("#ffffff").setRanges([rangeG]).build());
+
+    // B. Etiquetas de "Trámite" (Espera y Promesa) -> Color específico, FONDO BLANCO
+    if (cEspera) rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=ISNUMBER(SEARCH("_espera", $O2))`).setFontColor("#e69138").setBackground("#ffffff").setRanges([rangeG]).build());
+    if (cPromesa) rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=ISNUMBER(SEARCH("promesa", $O2))`).setFontColor("#38761d").setBackground("#ffffff").setRanges([rangeG]).build());
+    
+    // C. Colores de Urgencia (Días)
+    if (coloreaReportes) {
+      rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=$A2<=-31`).setBackground("#f4cccc").setRanges([rangeG]).build());
+      rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=AND($A2>=-30, $A2<=-1)`).setBackground("#fff2cc").setRanges([rangeG]).build());
+      rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=$A2=0`).setFontColor("#741b47").setRanges([rangeG]).build());
+    }
+    
+    if (rules.length > 0) hojaG.setConditionalFormatRules(rules);
+  }
+  
+  hojaG.autoResizeColumns(1, 14); 
+  hojaG.hideColumns(15);
+  SpreadsheetApp.flush();
+  
+  // ✨ DETERMINAR CARPETA DESTINO DINÁMICA
+  let carpetaDestinoGlobalId = obtenerOCrearRutaGlobalDinamica(idCarpetaGlobal);
+  
+  // Movemos el archivo a la carpeta destino calculada
+  DriveApp.getFileById(ssGlobal.getId()).moveTo(DriveApp.getFolderById(carpetaDestinoGlobalId));
+
+  // 5. ENVÍO OPCIONAL
+  if (enviarGlobal) {
+    let urlExportG = `https://docs.google.com/spreadsheets/d/${ssGlobal.getId()}/export?format=xlsx`;
+    let blobG = UrlFetchApp.fetch(urlExportG, {headers:{Authorization:"Bearer "+ScriptApp.getOAuthToken()}}).getBlob().setName(nombreArchivo + ".xlsx");
+    GmailApp.sendEmail("promotoria@1seguros.mx", `REPORTE GLOBAL MAESTRO: ${prefijo}`, "Consolidado global adjunto.", {attachments:[blobG]});
+  }
+  console.log("✅ Reporte Global finalizado con formatos de color perfeccionados.");
+}
+
+/** MOTOR DE INTEGRACIÓN Y LIMPIEZA: QUATTRO -> GOOGLE SHEETS
+    Incluye: Data Retention, Inyección Dinámica de Grupos y Auditoría Matricial en Log. */
+function procesarReportesQuattroXLSX() {
+  // =========================================================================
+  // 1. CONFIGURACIÓN INICIAL
+  // =========================================================================
+  const ID_CARPETA = '15pOR8HT5N2MfEr-hSJcLtbcGOCJd8JkS'; 
+  const ID_CARPETA_HISTORIAL = '1rRlxxqukHsWwa-BGBQcH6-KA7EyHzo7e'; 
+
+  
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const hojaMaestra = ss.getSheetByName('BD_Cobranza');
+  const hojaAsignaciones = ss.getSheetByName('Asignacion_Ramos');
+  const hojaCatRamos = ss.getSheetByName('Catalogo_ramos');
+  const hojaCatVendedores = ss.getSheetByName('Catalogo_vendedores');
+  const hojaCatGrupos = ss.getSheetByName('Catalogo_grupos');
+  const hojaConfig = ss.getSheetByName('Config');
+  const hojaClaves = ss.getSheetByName('Catalogo_ClavesJMV');
+  
+  if (!hojaMaestra || !hojaAsignaciones || !hojaCatRamos || !hojaCatVendedores || !hojaCatGrupos || !hojaConfig || !hojaClaves) {
+  console.error("CRÍTICO: Faltan pestañas. Verifica los nombres exactos.");
+  return;
+  }
+
+  // =========================================================================
+  // 1.5 MÓDULO DE LIMPIEZA (DATA RETENTION)
+  // =========================================================================
+  /** Version original. Tomaba mas tiempo de procesamiento...
+   * 
+   * const diasEliminar = parseInt(hojaConfig.getRange("B1").getValue());
+  let filasBorradas = 0; 
+  
+  if (!isNaN(diasEliminar) && diasEliminar > 0) {
+    let fechaCorte = new Date();
+    fechaCorte.setDate(fechaCorte.getDate() - diasEliminar);
+    
+    let datosLimpieza = hojaMaestra.getDataRange().getValues();
+    if (datosLimpieza.length > 1) {
+      let indexVigencia = datosLimpieza[0].indexOf('Vigencia inicial recibo');
+      
+      if (indexVigencia !== -1) {
+        for (let i = datosLimpieza.length - 1; i > 0; i--) {
+          let fechaRecibo = new Date(datosLimpieza[i][indexVigencia]);
+          if (!isNaN(fechaRecibo.getTime()) && fechaRecibo < fechaCorte) {
+            hojaMaestra.deleteRow(i + 1); 
+            filasBorradas++;
+          }
+        }
+      }
+    }
+  }
+  console.log(`LIMPIEZA: Se eliminaron ${filasBorradas} filas por antigüedad mayor a ${diasEliminar} días.`);
+ */
+
+  const diasEliminar = parseInt(hojaConfig.getRange("B1").getValue());
+  
+  if (!isNaN(diasEliminar) && diasEliminar > 0) {
+    let fechaCorte = new Date();
+    fechaCorte.setDate(fechaCorte.getDate() - diasEliminar);
+    
+    let datosLimpieza = hojaMaestra.getDataRange().getValues();
+    if (datosLimpieza.length > 1) {
+      let indexVigencia = datosLimpieza[0].indexOf('Vigencia inicial recibo');
+      
+      if (indexVigencia !== -1) {
+        // Filtramos las filas que SÍ queremos conservar
+        let datosFiltrados = datosLimpieza.filter((fila, index) => {
+          if (index === 0) return true; // Conservar encabezados
+          let fechaRecibo = new Date(fila[indexVigencia]);
+          // Conservar si la fecha es inválida o es mayor/igual a la fecha de corte
+          return isNaN(fechaRecibo.getTime()) || fechaRecibo >= fechaCorte;
+        });
+
+        let filasAEliminar = datosLimpieza.length - datosFiltrados.length;
+        
+        if (filasAEliminar > 0) {
+          hojaMaestra.clearContents();
+          hojaMaestra.getRange(1, 1, datosFiltrados.length, datosFiltrados[0].length).setValues(datosFiltrados);
+          console.log(`LIMPIEZA: Se eliminaron ${filasAEliminar} filas por antigüedad.`);
+        }
+      }
+    }
+  }
+
+  // =========================================================================
+  // 2. LECTURA Y MAPEO DE LA BASE DE DATOS ACTUAL
+  // =========================================================================
+  
+  // =========================================================================
+  // 2. LECTURA Y MAPEO DE LA BASE DE DATOS ACTUAL
+  // =========================================================================
+  const datosExistentes = hojaMaestra.getDataRange().getValues();
+  const cabecerasMaestras = datosExistentes[0];
+  
+  const indexReciboId = cabecerasMaestras.indexOf('ReciboId');
+  const indexEstado = cabecerasMaestras.indexOf('Estado_Cobranza');
+  const indexUltima = cabecerasMaestras.indexOf('Ultima_Gestion');
+  const indexNotas = cabecerasMaestras.indexOf('Notas_Asistente');
+  const indexStatusIA = cabecerasMaestras.indexOf('status_cobranzapp'); // ✨ Nueva columna técnica
+
+  const mapaRegistros = new Map();
+  if (datosExistentes.length > 1 && indexReciboId !== -1) {
+    for (let i = 1; i < datosExistentes.length; i++) {
+      let id = String(datosExistentes[i][indexReciboId]).trim();
+      if (id !== "") mapaRegistros.set(id, i); 
+    }
+  }
+
+  // --- MAPA DINÁMICO DE GRUPOS (VERSIÓN ROBUSTA) ---
+  const mapaVendedoresGrupo = new Map();
+  let datosVendCat = hojaCatVendedores.getDataRange().getValues();
+  
+  if (datosVendCat.length > 1) {
+    let cabecerasVend = datosVendCat[0];
+    let idxCatVendExistentes = cabecerasVend.indexOf('Vendedores_existentes');
+    let idxCatGrupo = cabecerasVend.indexOf('Grupo');
+    
+    if(idxCatVendExistentes !== -1 && idxCatGrupo !== -1) {
+      for (let i = 1; i < datosVendCat.length; i++) {
+        let vendCrudo = String(datosVendCat[i][idxCatVendExistentes]).trim(); 
+        let vendLimpio = vendCrudo.replace(/^\(D\)\s*/i, "").trim(); 
+        let grp = String(datosVendCat[i][idxCatGrupo] || "").trim();  
+        if (vendLimpio !== "") mapaVendedoresGrupo.set(vendLimpio, grp);
+      }
+    }
+  }
+
+  const ramosProcesadosSet = new Set();
+  const vendedoresProcesadosSet = new Set();
+  // ✨ CARGA DE CLAVES PERMITIDAS JMV Y LIBRETA DE ANOMALÍAS
+  // ✨ CARGA DE CLAVES PERMITIDAS JMV Y LIBRETA DE ANOMALÍAS (Limpia-ceros)
+  const clavesPermitidasJMV = new Set();
+  let datosClaves = hojaClaves.getDataRange().getValues();
+  for(let i = 0; i < datosClaves.length; i++) {
+    let clv = String(datosClaves[i][0]).trim();
+    if (clv !== "") {
+      let clvLimpia = clv.replace(/^0+/, '') || "0"; 
+      clavesPermitidasJMV.add(clvLimpia);
+    }
+ }
+  let clavesHuerfanasJMV = new Set(); // Aquí anotaremos las faltantes
+
+  // =========================================================================
+  // 3. RECOLECCIÓN Y PROCESAMIENTO DE ARCHIVOS
+  // =========================================================================
+  const carpeta = DriveApp.getFolderById(ID_CARPETA);
+  const archivosIterator = carpeta.getFiles(); 
+  let listaArchivos = [];
+
+  while (archivosIterator.hasNext()) {
+    let archivo = archivosIterator.next();
+    if (archivo.getName().toLowerCase().endsWith('.xlsx')) {
+      listaArchivos.push(archivo);
+    }
+  }
+  
+  listaArchivos.sort((a, b) => a.getDateCreated().getTime() - b.getDateCreated().getTime());
+
+  let nuevasFilasMap = new Map();
+  let filasAActualizar = new Map();
+  // ✨ VARIABLES PARA INFERENCIA DE CONCILIADOS
+  let recibosEntrantesSet = new Set();
+  let minFechaReporte = null;
+  let maxFechaReporte = null;
+  let indexVigenciaMaestra = cabecerasMaestras.indexOf('Vigencia inicial recibo'); 
+
+  for (let f = 0; f < listaArchivos.length; f++) {
+    let archivo = listaArchivos[f];
+    let nombreArchivo = archivo.getName();
+    console.log("Procesando archivo: " + nombreArchivo);
+
+    try {
+      let recurso = { name: "TEMP_" + nombreArchivo, mimeType: MimeType.GOOGLE_SHEETS, parents: [ID_CARPETA] };
+      let blobExcel = archivo.getBlob();
+      let archivoTemporal = Drive.Files.create(recurso, blobExcel, {supportsAllDrives: true});
+      
+      let tempSS = SpreadsheetApp.openById(archivoTemporal.id);
+      let tempSheet = tempSS.getSheets()[0];
+      let xlsxData = tempSheet.getDataRange().getValues();
+      
+      if (xlsxData.length > 0) {
+        let cabecerasXLSX = xlsxData[0]; 
+        let indexReciboIdXLSX = cabecerasXLSX.indexOf('ReciboId');
+        let indexVigenciaXLSX = cabecerasXLSX.indexOf('Vigencia inicial recibo'); // Buscamos la columna de fecha
+
+        if (indexReciboIdXLSX !== -1) {
+          for (let i = 1; i < xlsxData.length; i++) {
+            let filaXLSX = xlsxData[i];
+            let reciboIdActual = String(filaXLSX[indexReciboIdXLSX]).trim();
+
+            if (reciboIdActual !== "") {
+              
+              // ✨ ATRAPAMOS EL ID Y CALCULAMOS EL RANGO DE FECHAS
+              recibosEntrantesSet.add(reciboIdActual);
+              if (indexVigenciaXLSX !== -1) {
+                let fechaXLSX = new Date(filaXLSX[indexVigenciaXLSX]);
+                if (!isNaN(fechaXLSX.getTime())) {
+                  if (!minFechaReporte || fechaXLSX < minFechaReporte) minFechaReporte = fechaXLSX;
+                  if (!maxFechaReporte || fechaXLSX > maxFechaReporte) maxFechaReporte = fechaXLSX;
+                }
+              }
+              
+              // ✨ TRAMPA LÓGICA: Extracción anticipada del vendedor para auditar claves
+              let tempIndexVend = cabecerasXLSX.indexOf('Vendedor');
+              let tempIndexClave = cabecerasXLSX.indexOf('Clave de Agente');
+              let nombreVendCrudo = tempIndexVend !== -1 ? String(filaXLSX[tempIndexVend]).trim() : "";
+              let nombreVendLimpio = nombreVendCrudo.replace(/^\(D\)\s*/i, "").trim();
+              let grupoDelVendedor = mapaVendedoresGrupo.has(nombreVendLimpio) ? String(mapaVendedoresGrupo.get(nombreVendLimpio)).toLowerCase() : "";
+
+              // Si es de 1seguros, validamos su clave estandarizada
+              if (grupoDelVendedor.includes("1seguros")) {
+                let claveExtraida = tempIndexClave !== -1 ? String(filaXLSX[tempIndexClave]).trim() : "";
+                if (claveExtraida !== "") {
+                  let claveComparar = claveExtraida.replace(/^0+/, '') || "0";
+                  if (!clavesPermitidasJMV.has(claveComparar)) {
+                    clavesHuerfanasJMV.add(`${claveExtraida} (${nombreVendLimpio})`);
+                  }
+                }
+              }
+
+              let nuevaFila = cabecerasMaestras.map(cabecera => {
+                if (cabecera === 'Estado_Cobranza' || cabecera === 'Ultima_Gestion' || cabecera === 'Notas_Asistente') return null;
+
+                // INYECCIÓN DE GRUPO LÍMPIO (Reutilizando la variable extraída arriba)
+                if (cabecera === 'Grupo') {
+                  return mapaVendedoresGrupo.has(nombreVendLimpio) ? mapaVendedoresGrupo.get(nombreVendLimpio) : "";
+                }
+                
+                let indexXLSX = cabecerasXLSX.indexOf(cabecera);
+                if (indexXLSX === -1) return ''; 
+                
+                let valorOriginal = filaXLSX[indexXLSX];
+                
+                if (cabecera === 'Ramo' && valorOriginal) ramosProcesadosSet.add(String(valorOriginal).trim());
+                if (cabecera === 'Vendedor' && valorOriginal) vendedoresProcesadosSet.add(String(valorOriginal).trim());
+
+                let nombreCol = cabecera.toLowerCase();
+                if ((nombreCol.includes('fecha') || nombreCol.includes('vigencia') || nombreCol.includes('vencimiento')) && !nombreCol.includes('dias')) {
+                  if (valorOriginal === '' || valorOriginal === null) return '';
+                  if (valorOriginal instanceof Date) return valorOriginal; 
+                  let intentoFecha = new Date(valorOriginal);
+                  return isNaN(intentoFecha.getTime()) ? valorOriginal : intentoFecha;
+                }
+                
+                return valorOriginal;
+              });
+
+              if (mapaRegistros.has(reciboIdActual)) {
+                let rowIndex = mapaRegistros.get(reciboIdActual);
+                let filaExistente = datosExistentes[rowIndex];
+                
+                nuevaFila[indexEstado] = filaExistente[indexEstado];
+                nuevaFila[indexUltima] = filaExistente[indexUltima];
+                nuevaFila[indexNotas] = filaExistente[indexNotas];
+                
+                let hayCambios = false;
+                let zonaHoraria = Session.getScriptTimeZone();
+                
+                for (let c = 0; c < cabecerasMaestras.length; c++) {
+                  let nombreCol = String(cabecerasMaestras[c]).trim();
+                  let colNormalizada = nombreCol.toLowerCase();
+                  
+                  if (colNormalizada.includes("diferencia de d") || colNormalizada.includes("diasiniciovigencia") || colNormalizada === "dias") {
+                    continue; 
+                  }
+                  
+                  const normalizar = (val) => {
+                    if (val == null || val === "") return "";
+                    if (val instanceof Date) return Utilities.formatDate(val, zonaHoraria, "yyyy-MM-dd");
+                    let strVal = String(val).trim();
+                    if (!isNaN(strVal) && strVal !== "") return Number(strVal).toString(); 
+                    return strVal;
+                  };
+
+                  let valViejo = normalizar(filaExistente[c]);
+                  let valNuevo = normalizar(nuevaFila[c]);
+                  
+                  if (valNuevo !== valViejo) {
+                    hayCambios = true;
+                    break; 
+                  }
+                }
+                
+          
+                if (hayCambios) {
+                    // ✨ Si el CRM mandó información nueva, borramos el "visto" de la IA
+                    // para que Gemini vuelva a analizar el comentario actualizado.
+                    if (indexStatusIA !== -1) {
+                      nuevaFila[indexStatusIA] = ''; 
+                    }
+                    
+                    filasAActualizar.set(reciboIdActual, { filaReal: rowIndex + 1, datos: nuevaFila });
+                  }
+                
+              } else {
+                nuevaFila[indexEstado] = 'Pendiente';
+                nuevaFila[indexUltima] = '';
+                nuevaFila[indexNotas] = '';
+                nuevasFilasMap.set(reciboIdActual, nuevaFila);
+              }
+            }
+          }
+        }
+      }
+      DriveApp.getFileById(archivoTemporal.id).setTrashed(true);
+      
+      // MOVER EL ARCHIVO ORIGINAL AL HISTORIAL
+      let carpetaHistorial = DriveApp.getFolderById(ID_CARPETA_HISTORIAL);
+      archivo.moveTo(carpetaHistorial);
+      console.log(`Archivo movido al historial: ${nombreArchivo}`);
+
+    } catch (error) {
+      console.error("Error al procesar el archivo " + nombreArchivo + ": " + error.message);
+    }
+  }
+  // =========================================================================
+  // ✨ 3.5 INFERENCIA DE RECIBOS CONCILIADOS
+  // =========================================================================
+  let conciliadosInferidos = 0;
+  if (minFechaReporte && maxFechaReporte && recibosEntrantesSet.size > 0 && indexVigenciaMaestra !== -1) {
+    console.log(`🔍 Buscando conciliados inferidos entre ${minFechaReporte.toDateString()} y ${maxFechaReporte.toDateString()}...`);
+    
+    for (let i = 1; i < datosExistentes.length; i++) {
+      let fila = datosExistentes[i];
+      let id = String(fila[indexReciboId]).trim();
+      let estadoActual = String(fila[indexEstado] || "").trim();
+      
+      // Si ya está conciliado, cancelado o no tiene ID, lo ignoramos
+      if (id === "" || estadoActual.toLowerCase() === "conciliado" || estadoActual.toLowerCase().includes("cancelado")) continue;
+      
+      let fechaVigencia = new Date(fila[indexVigenciaMaestra]);
+      
+      // Si la fecha de este recibo cae dentro de las fechas del reporte nuevo...
+      if (!isNaN(fechaVigencia.getTime()) && fechaVigencia >= minFechaReporte && fechaVigencia <= maxFechaReporte) {
+        
+        // ... pero NO viene en el reporte nuevo, inferimos que ya se concilió
+        if (!recibosEntrantesSet.has(id)) {
+          let filaActualizada = [...fila]; // Clonamos la fila para no afectar otras lecturas
+          filaActualizada[indexEstado] = "Conciliado";
+          
+          // Lo mandamos a la fila de actualizaciones maestras para que se inyecte en el paso 4
+          filasAActualizar.set(id, { filaReal: i + 1, datos: filaActualizada });
+          conciliadosInferidos++;
+        }
+      }
+    }
+    console.log(`✅ Se infirieron ${conciliadosInferidos} recibos como Conciliados.`);
+  }
+
+  // =========================================================================
+  // 4. INYECCIÓN DE DATOS EN SHEETS
+  // =========================================================================
+  let conteoActualizaciones = 0;
+  for (let [id, infoUpdate] of filasAActualizar) {
+    hojaMaestra.getRange(infoUpdate.filaReal, 1, 1, cabecerasMaestras.length).setValues([infoUpdate.datos]);
+    conteoActualizaciones++;
+  }
+
+  let arrayNuevasFilas = Array.from(nuevasFilasMap.values());
+  if (arrayNuevasFilas.length > 0) {
+    hojaMaestra.getRange(hojaMaestra.getLastRow() + 1, 1, arrayNuevasFilas.length, cabecerasMaestras.length).setValues(arrayNuevasFilas);
+  }
+
+  // =========================================================================
+  // 5. CATÁLOGOS AVANZADOS Y RECOLECCIÓN PARA AUDITORÍA LOG
+  // =========================================================================
+  
+  // A. ACTUALIZAR RAMOS
+  let datosCatRamos = hojaCatRamos.getDataRange().getValues();
+  let ramosExistentes = new Set();
+  if (datosCatRamos.length > 1) {
+    for (let i = 1; i < datosCatRamos.length; i++) {
+      if (datosCatRamos[i][2]) ramosExistentes.add(String(datosCatRamos[i][2]).trim());
+    }
+  }
+  let nuevosRamos = [];
+  ramosProcesadosSet.forEach(r => {
+    if (!ramosExistentes.has(r) && r !== "") nuevosRamos.push([r]);
+  });
+  if (nuevosRamos.length > 0) {
+    let ur = hojaCatRamos.getLastRow() < 1 ? 1 : hojaCatRamos.getLastRow();
+    hojaCatRamos.getRange(ur + 1, 3, nuevosRamos.length, 1).setValues(nuevosRamos);
+  }
+
+  // B. ACTUALIZAR VENDEDORES
+  let datosV = hojaCatVendedores.getDataRange().getValues();
+  let vendActuales = new Set();
+  if (datosV.length > 1) {
+    for (let i = 1; i < datosV.length; i++) {
+      if (datosV[i][2]) vendActuales.add(String(datosV[i][2]).trim());
+    }
+  }
+  let nuevosVend = [];
+  vendedoresProcesadosSet.forEach(v => {
+    if (!vendActuales.has(v) && v !== "") nuevosVend.push([v]);
+  });
+  if (nuevosVend.length > 0) {
+    let uv = hojaCatVendedores.getLastRow() < 1 ? 1 : hojaCatVendedores.getLastRow();
+    hojaCatVendedores.getRange(uv + 1, 3, nuevosVend.length, 1).setValues(nuevosVend);
+  }
+
+  // C. CONSTRUIR CATALOGO DE GRUPOS Y AUDITAR
+  datosV = hojaCatVendedores.getDataRange().getValues(); 
+  let gruposUnicos = new Set();
+  let listaVendedoresAuditada = [];
+  listaVendedoresAuditada.push([datosV[0][1] || "Vendedores_sin_grupo", datosV[0][2] || "Vendedores_existentes", datosV[0][3] || "Grupo"]);
+  
+  // Arreglos para el Log Final
+  let vendedoresSinBaseLog = [];
+  let vendedoresAmbosLog = [];
+  let vendedoresSinGrupoLog = [];
+
+  for (let i = 1; i < datosV.length; i++) {
+     let vend = String(datosV[i][2]).trim();
+     let grupoString = String(datosV[i][3] || "").trim();
+     let sinGrupo = "";
+     
+     if (vend !== "") {
+       if (grupoString === "") {
+         sinGrupo = vend; 
+         vendedoresSinGrupoLog.push(vend);
+       } else {
+         grupoString.split(",").forEach(p => {
+           let g = p.trim();
+           if (g !== "") gruposUnicos.add(g);
+         });
+       }
+
+       // --- VALIDACIÓN DE REGLAS DE NEGOCIO (1Seguros/Promotoria) ---
+       let grpLower = grupoString.toLowerCase();
+       let tiene1Seg = grpLower.includes('1seguros');
+       let tieneProm = grpLower.includes('promotoria');
+
+       if (!tiene1Seg && !tieneProm) {
+           vendedoresSinBaseLog.push(vend);
+       } else if (tiene1Seg && tieneProm) {
+           vendedoresAmbosLog.push(vend);
+       }
+
+       listaVendedoresAuditada.push([sinGrupo, vend, grupoString]);
+     }
+  }
+  if(listaVendedoresAuditada.length > 1) {
+     hojaCatVendedores.getRange(1, 2, listaVendedoresAuditada.length, 3).setValues(listaVendedoresAuditada);
+  }
+
+  // Escribir lista maestra de Grupos
+  let arrGrupos = Array.from(gruposUnicos).map(g => [g]);
+  hojaCatGrupos.getRange("B:C").clearContent();
+  hojaCatGrupos.getRange("B1:C1").setValues([["Grupos_sin_asignar", "Grupos"]]);
+  if (arrGrupos.length > 0) {
+    hojaCatGrupos.getRange(2, 3, arrGrupos.length, 1).setValues(arrGrupos);
+  }
+
+  // D. AUDITORÍA CONTRA ASIGNACIONES
+  let datosAsign = hojaAsignaciones.getDataRange().getValues();
+  let ramosAsigGlobal = "";
+  let gruposAsigGlobal = "";
+  
+  if (datosAsign.length > 1) {
+    for (let i = 1; i < datosAsign.length; i++) {
+      let rVis = String(datosAsign[i][2] || "").trim(); 
+      let gVis = String(datosAsign[i][3] || "").trim(); 
+      if (rVis.toUpperCase() !== "TODOS") ramosAsigGlobal += rVis + ",";
+      if (gVis.toUpperCase() !== "TODOS") gruposAsigGlobal += gVis + ",";
+    }
+  }
+
+  // Auditoría Ramos
+  let datosCatR = hojaCatRamos.getDataRange().getValues();
+  let listaRamosAuditada = [[datosCatR[0][1] || "Ramos_sin_asignar", datosCatR[0][2] || "Ramos_existentes"]];
+  let ramosSinAsignarLog = [];
+  
+  for (let i = 1; i < datosCatR.length; i++) {
+    let r = String(datosCatR[i][2]).trim();
+    if (r !== "") {
+      let falta = ramosAsigGlobal.includes(r) ? "" : r;
+      listaRamosAuditada.push([falta, r]);
+      if (falta !== "") ramosSinAsignarLog.push(falta);
+    }
+  }
+  if(listaRamosAuditada.length > 1) hojaCatRamos.getRange(1, 2, listaRamosAuditada.length, 2).setValues(listaRamosAuditada);
+
+  // Auditoría Grupos
+  let listaGruposAuditada = [["Grupos_sin_asignar", "Grupos"]];
+  let gruposSinAsignarLog = [];
+  
+  Array.from(gruposUnicos).forEach(g => {
+     let falta = gruposAsigGlobal.includes(g) ? "" : g;
+     listaGruposAuditada.push([falta, g]);
+     if (falta !== "") gruposSinAsignarLog.push(falta);
+  });
+  if (listaGruposAuditada.length > 1) hojaCatGrupos.getRange(1, 2, listaGruposAuditada.length, 2).setValues(listaGruposAuditada);
+
+  // =========================================================================
+  // 6. REPORTE FINAL EN EL LOG
+  // =========================================================================
+  console.log(`\n========== REPORTE DE AUDITORÍA ==========`);
+  
+  if (vendedoresSinBaseLog.length > 0) {
+    console.log(`🚨 ERROR: Vendedores sin '1seguros' ni 'Promotoria': \n   -> ${vendedoresSinBaseLog.join(", ")}`);
+  }
+  if (vendedoresAmbosLog.length > 0) {
+    console.log(`⚠️ ADVERTENCIA: Vendedores asignados a AMBOS (1seguros y Promotoria) a la vez: \n   -> ${vendedoresAmbosLog.join(", ")}`);
+  }
+  if (vendedoresSinGrupoLog.length > 0) {
+    console.log(`🔸 Vendedores sin ningún grupo asignado: \n   -> ${vendedoresSinGrupoLog.join(", ")}`);
+    return "DETENER";
+  }
+  if (ramosSinAsignarLog.length > 0) {
+    console.log(`🔸 Ramos en catálogo pero NO asignados a ningún asistente: \n   -> ${ramosSinAsignarLog.join(", ")}`);
+  }
+  if (gruposSinAsignarLog.length > 0) {
+    console.log(`🔸 Grupos en catálogo pero NO asignados a ningún asistente: \n   -> ${gruposSinAsignarLog.join(", ")}`);
+  }
+  if (clavesHuerfanasJMV.size > 0) {
+  console.log(`⚠️ ALERTA JMV: Vendedores de '1seguros' con Clave de Agente NUEVA que no está en el Catalogo_ClavesJMV (Agrégalas para evitar perder recibos): \n   -> ${Array.from(clavesHuerfanasJMV).join(" | ")}`);
+  }
+  
+  console.log(`==========================================\n`);
+  console.log(`PROCESO TERMINADO. Inyectados: ${arrayNuevasFilas.length}. Actualizados: ${conteoActualizaciones}. Catálogos al 100%.`);
+}
+
+
+function actualizarFestivosMexico() {
+  // Conectamos con el archivo Cobranzapp usando su ID
+  var idLibro = '1tgROOAnGSGyeG0di86dSy9VqZv8bWmneWZNtYV05dGA';
+  var libro = SpreadsheetApp.openById(idLibro);
+  
+  // Buscamos la pestaña Festivos, si no existe, la crea
+  var hoja = libro.getSheetByName('Festivos');
+  if (!hoja) {
+    hoja = libro.insertSheet('Festivos');
+  }
+
+  var anioActual = new Date().getFullYear();
+  
+  // Generamos los festivos de este año y del próximo para evitar errores en diciembre/enero
+  var festivos = obtenerDiasFestivos(anioActual).concat(obtenerDiasFestivos(anioActual + 1));
+
+  // Limpiamos la pestaña actual
+  hoja.clear();
+  
+  // Escribimos los encabezados
+  hoja.appendRow(['Fecha', 'Motivo', 'Tipo']);
+  hoja.getRange(1, 1, 1, 3).setFontWeight('bold').setBackground('#f3f3f3');
+
+  // Escribimos todas las fechas calculadas
+  festivos.forEach(function(festivo) {
+    hoja.appendRow([festivo.fecha, festivo.motivo, festivo.tipo]);
+  });
+
+  // Le damos formato de fecha a la primera columna para que se lea correctamente
+  if (hoja.getLastRow() > 1) {
+    hoja.getRange(2, 1, hoja.getLastRow() - 1, 1).setNumberFormat('dd/MM/yyyy');
+  }
+}
+
+// --- MOTOR DE CÁLCULO DE FECHAS OFICIALES ---
+function obtenerDiasFestivos(anio) {
+  var dias = [];
+
+  // 1. Año Nuevo (Fijo)
+  dias.push({fecha: new Date(anio, 0, 1), motivo: 'Año Nuevo', tipo: 'Fijo'});
+
+  // 2. Día de la Constitución (Móvil: Primer lunes de febrero)
+  // Nota: en JavaScript los meses van de 0 (Enero) a 11 (Diciembre)
+  dias.push({fecha: calcularLunesMovil(anio, 1, 1), motivo: 'Día de la Constitución', tipo: 'Móvil'});
+
+  // 3. Natalicio de Benito Juárez (Móvil: Tercer lunes de marzo)
+  dias.push({fecha: calcularLunesMovil(anio, 2, 3), motivo: 'Natalicio de Benito Juárez', tipo: 'Móvil'});
+
+  // 4. Día del Trabajo (Fijo)
+  dias.push({fecha: new Date(anio, 4, 1), motivo: 'Día del Trabajo', tipo: 'Fijo'});
+
+  // 5. Día de la Independencia (Fijo)
+  dias.push({fecha: new Date(anio, 8, 16), motivo: 'Día de la Independencia', tipo: 'Fijo'});
+
+  // 6. Transmisión del Poder Ejecutivo (1 de octubre - Aplica cada 6 años, iniciado en 2024)
+  if ((anio - 2024) % 6 === 0) {
+    dias.push({fecha: new Date(anio, 9, 1), motivo: 'Transmisión Poder Ejecutivo', tipo: 'Fijo cada 6 años'});
+  }
+
+  // 7. Revolución Mexicana (Móvil: Tercer lunes de noviembre)
+  dias.push({fecha: calcularLunesMovil(anio, 10, 3), motivo: 'Revolución Mexicana', tipo: 'Móvil'});
+
+  // 8. Navidad (Fijo)
+  dias.push({fecha: new Date(anio, 11, 25), motivo: 'Navidad', tipo: 'Fijo'});
+
+  return dias;
+}
+
+// --- FUNCIÓN MATEMÁTICA PARA ENCONTRAR LOS PUENTES ---
+function calcularLunesMovil(anio, mes, numeroDeLunes) {
+  var fecha = new Date(anio, mes, 1);
+  var diaSemana = fecha.getDay(); // 0 es Domingo, 1 es Lunes
+  
+  // Calculamos cuántos días faltan para el primer lunes
+  var diasParaPrimerLunes = (diaSemana === 0) ? 1 : (diaSemana === 1) ? 0 : 8 - diaSemana;
+  
+  // Le sumamos las semanas necesarias (ej. para el 3er lunes, sumamos 14 días)
+  fecha.setDate(1 + diasParaPrimerLunes + (numeroDeLunes - 1) * 7);
+  return fecha;
+}
+
+// --- ACTIVADOR AUTOMÁTICO (TRIGGER) ---
+function programarActualizadorAnual() {
+  // Primero eliminamos cualquier activador previo para no tener duplicados
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'actualizarFestivosMexico') {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
+  }
+
+  // Creamos un activador que corra el 1 de enero de cada año a las 2:00 AM
+  ScriptApp.newTrigger('actualizarFestivosMexico')
+    .timeBased()
+    .onMonthDay(1)
+    .atHour(2)
+    .create();
+}
+
+
+function procesarRecordatoriosCobranza() {
+  // ==========================================
+  // 🛑 INTERRUPTOR DE MODO PRUEBA
+  // true  = Solo lee y genera bitácora. NO envía ni etiqueta nada.
+  // false = MODO OPERATIVO. Envía correos y aplica etiquetas.
+  var MODO_PRUEBA = true; 
+  // ==========================================
+
+  Logger.log("[INFO] Iniciando ejecución de Bot de COBRANZA (GMM / Health Insurance). Modo Prueba: " + (MODO_PRUEBA ? "ACTIVADO" : "DESACTIVADO"));
+
+  var idLibro = SpreadsheetApp.getActiveSpreadsheet().getId(); 
+  var libro = SpreadsheetApp.getActiveSpreadsheet();
+  
+  // 1. Cargar Días Festivos
+  var hojaFestivos = libro.getSheetByName('Festivos');
+  var festivos = [];
+  if (hojaFestivos) {
+    var datosFestivos = hojaFestivos.getDataRange().getValues();
+    for (var f = 1; f < datosFestivos.length; f++) {
+      if (datosFestivos[f][0]) {
+        var fechaF = new Date(datosFestivos[f][0]);
+        festivos.push(fechaF.toISOString().split('T')[0]);
+      }
+    }
+  }
+
+  // 2. Cargar BD de Cobranza
+  var hojaBD = libro.getSheetByName('BD_Cobranza');
+  var datosBD = hojaBD.getDataRange().getValues();
+  var encabezados = datosBD[0];
+  var baseCobranza = [];
+  for (var i = 1; i < datosBD.length; i++) {
+    var fila = {};
+    for (var j = 0; j < encabezados.length; j++) {
+      fila[encabezados[j]] = datosBD[i][j];
+    }
+    fila.indiceFila = i + 1; 
+    baseCobranza.push(fila);
+  }
+
+  // 3. Crear/Obtener Etiquetas 
+  var etiquetaSeguimiento = obtenerOCrearEtiqueta("Seguimiento_Enviado");
+  var etiquetaPagado = obtenerOCrearEtiqueta("Pagado");
+  var etiquetaMensual = obtenerOCrearEtiqueta("Mensual");
+  var etiquetaError = obtenerOCrearEtiqueta("Error_BD"); // Instanciamos la etiqueta de error al inicio
+
+  // 4. Búsqueda ultra filtrada (Incluye ambas variantes de asunto)
+  var busqueda = '(subject:"// POLIZA GMM" OR subject:"// HEALTH INSURANCE") from:me -label:Seguimiento_Enviado -label:Pagado -label:Mensual -label:Error_BD newer_than:40d';
+  var hilos = GmailApp.search(busqueda);
+  var miCorreo = Session.getActiveUser().getEmail();
+  var hoy = new Date();
+
+  Logger.log("[INFO] Se encontraron " + hilos.length + " hilos pendientes de revisión en Gmail.");
+
+  // 5. Procesar cada correo
+  for (var h = 0; h < hilos.length; h++) {
+    var hilo = hilos[h];
+    var asunto = hilo.getFirstMessageSubject(); 
+    var mensajes = hilo.getMessages();
+    var ultimoMensaje = mensajes[mensajes.length - 1];
+
+    Logger.log(" "); 
+    Logger.log("[INFO] --- Evaluando Hilo " + (h + 1) + " ---");
+
+    // Validar si el cliente ya contestó
+    var clienteYaRespondio = false;
+    for (var m = 0; m < mensajes.length; m++) {
+      if (mensajes[m].getFrom().indexOf(miCorreo) === -1) {
+        clienteYaRespondio = true;
+        break;
+      }
+    }
+
+    if (clienteYaRespondio) {
+      Logger.log('[OMITIDO] El cliente ya respondió a este correo. Asunto: "' + asunto + '"');
+      if (!MODO_PRUEBA) {
+        hilo.addLabel(etiquetaSeguimiento);
+        Logger.log('[ETIQUETA] Se aplicó la etiqueta "Seguimiento_Enviado" para sacarlo del radar.');
+      }
+      continue; 
+    }
+
+    // -- PARSEO DEL ASUNTO --
+    Logger.log('[LECTURA] Asunto original: "' + asunto + '"');
+    var fragmentos = asunto.split("//");
+    
+    // ERROR BARRERA 1A: Faltan separadores
+    if (fragmentos.length < 3) {
+      Logger.log("[ERROR] Formato de asunto inválido (Faltan separadores //). Enviando alerta interna.");
+      if (!MODO_PRUEBA) {
+        var cuerpoErrorF = "<b>🚨 ALERTA DEL BOT DE COBRANZA</b><br><br>" +
+                           "El asunto de este correo no tiene el formato correcto (faltan los separadores '//').<br><br>" +
+                           "<b>Asunto detectado:</b> " + asunto + "<br><br>" +
+                           "Por favor, asegúrate de estructurar el asunto correctamente.<br><br>" +
+                           "<i>Nota: A este hilo se le ha puesto la etiqueta oculta 'Error_BD' para evitar reenviar esta alerta. Quítala cuando corrijas el error.</i>";
+        ultimoMensaje.forward(miCorreo, { htmlBody: cuerpoErrorF });
+        hilo.addLabel(etiquetaError);
+        Logger.log('[ETIQUETA] Se aplicó la etiqueta "Error_BD" para no repetir la alerta de este hilo.');
+      }
+      continue; 
+    }
+
+    var segmentoPolizaBruto = fragmentos[1].trim(); 
+    var segmentoPoliza = segmentoPolizaBruto.split("&")[0].trim().toUpperCase(); 
+    var segmentoAseguradora = (fragmentos.length > 3) ? fragmentos[2].trim().toUpperCase() : fragmentos[1].trim().toUpperCase();
+    var segmentoRecibo = fragmentos[fragmentos.length - 1].trim(); 
+
+    var numeroReciboMatch = segmentoRecibo.match(/\d+/);
+    var numeroRecibo = numeroReciboMatch ? parseInt(numeroReciboMatch[0]) : null;
+
+    Logger.log('[DATOS EXTRAÍDOS] Póliza: "' + segmentoPoliza + '" | Aseguradora: "' + segmentoAseguradora + '" | Recibo: ' + (numeroRecibo !== null ? numeroRecibo : "NULL"));
+
+    // ERROR BARRERA 1B: No se detectó un número de recibo
+    if (!numeroRecibo) {
+      Logger.log("[ERROR] No se detectó un número de recibo válido en el asunto. Enviando alerta interna.");
+      if (!MODO_PRUEBA) {
+        var cuerpoErrorR = "<b>🚨 ALERTA DEL BOT DE COBRANZA</b><br><br>" +
+                           "No se detectó un número de recibo válido (dígito numérico) en el asunto del correo.<br><br>" +
+                           "<b>Asunto detectado:</b> " + asunto + "<br>" +
+                           "<b>Fragmento analizado:</b> " + segmentoRecibo + "<br><br>" +
+                           "Recuerda usar números (ej. '2' en lugar de 'SECOND').<br><br>" +
+                           "<i>Nota: A este hilo se le ha puesto la etiqueta oculta 'Error_BD' para evitar reenviar esta alerta. Quítala cuando corrijas el error.</i>";
+        ultimoMensaje.forward(miCorreo, { htmlBody: cuerpoErrorR });
+        hilo.addLabel(etiquetaError);
+        Logger.log('[ETIQUETA] Se aplicó la etiqueta "Error_BD" para no repetir la alerta de este hilo.');
+      }
+      continue; 
+    }
+
+    // -- BÚSQUEDA EN BD (Triple Validación) --
+    Logger.log("[BUSCANDO] Intentando match en BD_Cobranza...");
+    
+    var registroEncontrado = baseCobranza.find(function(registro) {
+      var ramo = String(registro['Ramo'] || '').toUpperCase();
+      var polizaHoja = String(registro['Póliza'] || '').toUpperCase();
+      var aseguradoraHoja = String(registro['Aseguradora'] || '').toUpperCase();
+      var reciboHoja = parseInt(registro['Serie recibo']);
+
+      var matchRamo = (ramo === 'SALUD' || ramo === 'SALUD GPO');
+      var matchPoliza = (polizaHoja.indexOf(segmentoPoliza) !== -1 || segmentoPolizaBruto.toUpperCase().indexOf(polizaHoja) !== -1);
+      var matchAseguradora = (segmentoAseguradora.indexOf(aseguradoraHoja) !== -1 || asunto.toUpperCase().indexOf(aseguradoraHoja) !== -1);
+      var matchRecibo = (reciboHoja === numeroRecibo);
+
+      return matchRamo && matchPoliza && matchAseguradora && matchRecibo;
+    });
+
+    // ERROR BARRERA 2: No hubo coincidencia en Excel
+    if (!registroEncontrado) {
+      Logger.log("[ERROR] No se encontró coincidencia exacta en la BD. Enviando aviso interno.");
+      
+      if (!MODO_PRUEBA) {
+        var cuerpoErrorBD = "<b>🚨 ALERTA DEL BOT DE COBRANZA</b><br><br>" +
+                          "No se encontró una coincidencia exacta en la base de datos para este correo.<br><br>" +
+                          "<b>Datos extraídos del asunto:</b><br>" +
+                          "<ul>" +
+                          "<li><b>Póliza buscada:</b> " + segmentoPoliza + "</li>" +
+                          "<li><b>Aseguradora buscada:</b> " + segmentoAseguradora + "</li>" +
+                          "<li><b>Recibo buscado:</b> " + numeroRecibo + "</li>" +
+                          "</ul>" +
+                          "Por favor, revisa que el asunto del correo y los datos en la pestaña <i>BD_Cobranza</i> coincidan exactamente.<br><br>" +
+                          "<i>Nota: A este hilo se le ha puesto la etiqueta oculta 'Error_BD' para evitar reenviar esta alerta. Quítala cuando corrijas el error.</i>";
+        
+        ultimoMensaje.forward(miCorreo, { htmlBody: cuerpoErrorBD });
+        hilo.addLabel(etiquetaError);
+        Logger.log('[ETIQUETA] Se aplicó la etiqueta "Error_BD" para no repetir la alerta de este hilo.');
+      }
+      continue; 
+    } 
+
+    var estadoCobranza = String(registroEncontrado['Estado_Cobranza']).trim().toUpperCase();
+    var formaPago = String(registroEncontrado['Forma de Pago']).trim().toUpperCase();
+    var vigenciaInicial = new Date(registroEncontrado['Vigencia inicial recibo']);
+
+    Logger.log("[EXITO] Cliente encontrado. Estado: " + estadoCobranza + " | Forma de pago: " + formaPago);
+
+    // -- FLUJO DE DECISIÓN --
+    if (estadoCobranza === 'CONCILIADO') {
+      Logger.log("[OMITIDO] El estado es CONCILIADO.");
+      if (!MODO_PRUEBA) {
+        hilo.addLabel(etiquetaPagado);
+        Logger.log('[ETIQUETA] Se aplicó la etiqueta "Pagado".');
+      }
+      continue;
+    }
+
+    if (formaPago === 'MENSUAL') {
+      Logger.log("[OMITIDO] Pago MENSUAL. No se envía recordatorio automático.");
+      if (!MODO_PRUEBA) {
+        hilo.addLabel(etiquetaMensual);
+        Logger.log('[ETIQUETA] Se aplicó la etiqueta "Mensual".');
+      }
+      continue;
+    }
+
+    if (estadoCobranza === 'PENDIENTE') {
+      // 1. Validar Vigencia
+      var fechaLimiteCobro = sumarDiasHabiles(vigenciaInicial, 4, festivos);
+      fechaLimiteCobro.setHours(0,0,0,0);
+      var hoySinHora = new Date();
+      hoySinHora.setHours(0,0,0,0);
+
+      if (hoySinHora <= fechaLimiteCobro) {
+        var fechaFormatVigencia = fechaLimiteCobro.toISOString().split('T')[0];
+        Logger.log("[EN ESPERA] Fecha límite calculada para vigencia: " + fechaFormatVigencia + ". Aún faltan días hábiles para el cobro.");
+        continue;
+      }
+
+      // 2. Validar tiempo desde el último correo
+      var fechaUltimoCorreo = new Date(ultimoMensaje.getDate());
+      var fechaToleranciaCorreo = sumarDiasHabiles(fechaUltimoCorreo, 4, festivos);
+      fechaToleranciaCorreo.setHours(0,0,0,0);
+
+      if (hoySinHora >= fechaToleranciaCorreo) {
+        
+        if (MODO_PRUEBA) {
+          Logger.log("[SIMULACIÓN] ✉️ Los tiempos se cumplieron. Aquí se habría enviado el correo.");
+          Logger.log('[SIMULACIÓN] Se habría aplicado la etiqueta "Seguimiento_Enviado".');
+        } else {
+          // ACCIÓN REAL
+          var htmlBody = ultimoMensaje.getBody(); 
+          var adjuntos = ultimoMensaje.getAttachments(); 
+          
+          ultimoMensaje.replyAll("", {
+            htmlBody: htmlBody,
+            attachments: adjuntos
+          });
+          
+          hilo.addLabel(etiquetaSeguimiento);
+          Logger.log("[ACCIÓN] ✉️ Recordatorio enviado exitosamente.");
+          Logger.log('[ETIQUETA] Se aplicó la etiqueta "Seguimiento_Enviado" tras enviar el recordatorio.');
+        }
+
+      } else {
+        var fechaFormatSeguimiento = fechaToleranciaCorreo.toISOString().split('T')[0];
+        Logger.log("[EN ESPERA] Fecha límite calculada para seguimiento: " + fechaFormatSeguimiento + ". Aún no se cumplen los 4 días hábiles de tolerancia.");
+      }
+    }
+  }
+  Logger.log("[INFO] Ejecución de Bot de COBRANZA Finalizada.");
+}
+
+// --- FUNCIONES AUXILIARES ---
+function obtenerOCrearEtiqueta(nombre) {
+  var etiqueta = GmailApp.getUserLabelByName(nombre);
+  if (!etiqueta) {
+    etiqueta = GmailApp.createLabel(nombre);
+  }
+  return etiqueta;
+}
+
+function sumarDiasHabiles(fechaInicio, diasASumar, festivosArreglo) {
+  var fecha = new Date(fechaInicio.getTime());
+  var diasSumados = 0;
+  while (diasSumados < diasASumar) {
+    fecha.setDate(fecha.getDate() + 1);
+    var diaSemana = fecha.getDay();
+    var fechaString = fecha.toISOString().split('T')[0];
+    if (diaSemana !== 0 && diaSemana !== 6 && festivosArreglo.indexOf(fechaString) === -1) {
+      diasSumados++;
+    }
+  }
+  return fecha;
+}
+
+
+
+
+
+
+
