@@ -112,7 +112,7 @@ function procesarComentariosIA() {
             let tagIA = String(respuestasGemini[j]).trim().toLowerCase();
 
             // ✨ AHORA VERIFICAMOS MÚLTIPLES ETIQUETAS (Puedes agregar más si lo necesitas)
-            if (tagIA === "_pagado" || tagIA === "_cancelado" || tagIA === "_pt" || tagIA === "_reexpedido" || tagIA === "_espera") {
+            if (tagIA === "_pagado" || tagIA === "_cancelado" || tagIA === "_pt" || tagIA === "_reexpedido" || tagIA === "_espera" || tagIA === "_promesa") {
               
               // ✨ Concatenamos la etiqueta al final del comentario original y la guardamos en la columna Comentario
               let nuevoComentario = item.comentario + " " + tagIA;
