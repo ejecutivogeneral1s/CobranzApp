@@ -25,3 +25,11 @@ El sistema se compone de módulos independientes orquestados para ejecutarse en 
 * **`procesarComentariosIA()`:** El analista virtual. Extrae gestiones pendientes, consulta a la API de Gemini mediante prompts estructurados y actualiza la base de datos con las clasificaciones.
 * **`generarReportes(...)`:** Los constructores. Filtran los datos en memoria, aplican reglas de negocio (vendedores, ramos, antigüedad), inyectan fórmulas/formato condicional y generan archivos `.xlsx` limpios.
 * **`obtenerOCrearRutaDinamica()`:** El gestor de archivos. Algoritmo recursivo que garantiza que cada reporte se guarde en una estructura de carpetas estandarizada en Drive.
+
+
+## ⚙️ Configuración y Despliegue
+
+1. **Preparar el Entorno:** Este script debe estar vinculado a un documento de Google Sheets que contenga la estructura de base de datos requerida (pestañas obligatorias: `BD_Cobranza`, `Config`, `Catalogo_vendedores`, `Catalogo_ramos`).
+2. **Variables de Entorno (API Key):** En el editor de Apps Script, navega a **Configuración del proyecto > Propiedades del script** y añade una variable llamada `GEMINI_API_KEY` con tu token de acceso de Google AI Studio.
+3. **Autorización de Permisos:** Ejecuta manualmente la función `onOpen()` por primera vez desde el editor de código. Google solicitará autorizar los scopes necesarios (Drive, Gmail y Spreadsheets).
+4. **Uso de la Interfaz:** Recarga el documento de Google Sheets para renderizar el menú personalizado **🤖 CobranzApp**. Desde esta interfaz gráfica se orquesta la ejecución completa (IA y generación de reportes).
