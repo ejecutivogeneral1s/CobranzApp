@@ -763,7 +763,7 @@ function generarReportesJMV() {
       try {
         let urlExport = `https://docs.google.com/spreadsheets/d/${spreadsheetSubs.getId()}/export?format=xlsx`;
         let blob = UrlFetchApp.fetch(urlExport, {headers:{Authorization:"Bearer "+ScriptApp.getOAuthToken()}}).getBlob().setName(nombreArchivoSubs + ".xlsx");
-        GmailApp.sendEmail("promotoria@1seguros.mx", `🟢 REPORTE CONCILIAR SUBS: ${prefijo || mm + " " + dd}`, "Adjunto encontrarás el reporte consolidado de pagos aplicados por subagentes para su conciliación.", {attachments:[blob]});
+        GmailApp.sendEmail("promotoria@1seguros.mx", `🟢 REPORTE CONCILIAR SUBS: ${mm} ${dd} ${mesTexto}`, "Adjunto encontrarás el reporte consolidado de pagos aplicados por subagentes para su conciliación.", {attachments:[blob]});
         console.log(`CORREO ENVIADO: Conciliar Subs a promotoria@1seguros.mx`);
       } catch (e) {
         console.error(`Error enviando correo Conciliar Subs: ${e.message}`);
