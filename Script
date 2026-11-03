@@ -535,6 +535,7 @@ function generarReportesJMV() {
 
     let nombreArchivoFinal = `${mm} ${dd} ${mesTexto} ${reporteNombre}`;
     let nuevoSpreadsheet = SpreadsheetApp.create(nombreArchivoFinal);
+    nuevoSpreadsheet.setSpreadsheetLocale('en_US');
     let idArchivo = nuevoSpreadsheet.getId();
     let isFirstSheet = true;
     
@@ -699,6 +700,7 @@ function generarReportesJMV() {
       // Si es el primer ramo con datos, creamos el archivo maestro
       if (!tieneDatosSubs) {
         spreadsheetSubs = SpreadsheetApp.create(nombreArchivoSubs);
+        spreadsheetSubs.setSpreadsheetLocale('en_US');
         tieneDatosSubs = true;
       }
 
@@ -979,6 +981,7 @@ function generarReportesIndividualesPromotoria() {
 
     let config = mapaConfig.get(nombre);
     let ssN = SpreadsheetApp.create(`${prefijo} Cobranza ${nombre}`);
+    ssN.setSpreadsheetLocale('en_US');
     let hoja = ssN.getSheets()[0];
     hoja.getRange(1,1,matriz.length, cols.length).setValues(matriz);
     
@@ -1141,6 +1144,7 @@ function generarReporteGlobalPromotoria() {
 
   // 4. CREACIÓN Y FORMATO
   let ssGlobal = SpreadsheetApp.create(nombreArchivo);
+  ssGlobal.setSpreadsheetLocale('en_US');
   let hojaG = ssGlobal.getSheets()[0];
   hojaG.getRange(1,1,matrizG.length, colsG.length).setValues(matrizG);
   hojaG.getRange(1,1,1,colsG.length).setFontWeight("bold").setBackground("#cfe2f3");
